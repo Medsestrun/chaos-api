@@ -3,10 +3,25 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "dev": "bun run --hot index.ts",
+    "start": "NODE_ENV=production bun run index.ts",
+    "create-migration": "bunx drizzle-kit generate",
+    "migrate": "bunx drizzle-kit migrate",
+    "studio": "bunx drizzle-kit studio"
+  },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "better-sqlite3": "^12.4.1",
+    "drizzle-kit": "^0.31.5"
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "dependencies": {
+    "bignumber.js": "^9.3.1",
+    "drizzle-orm": "^0.44.6",
+    "hono": "^4.9.10",
+    "hyperliquid": "^1.7.7"
   }
 }
