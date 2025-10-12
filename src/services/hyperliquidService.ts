@@ -1,9 +1,9 @@
-import BigNumber from 'bignumber.js';
 import { inArray } from 'drizzle-orm';
-import { Hyperliquid, type WsOrder, type WsUserFills } from 'hyperliquid';
+import { Hyperliquid, type OrderResponse, type WsOrder, type WsUserFills } from 'hyperliquid';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
 import memoryStorage from '../MemoryStorage';
+import strategyService from './strategyService';
 
 type Order = typeof schema.orders.$inferSelect;
 
@@ -71,6 +71,24 @@ class HyperliquidService {
    */
   private async handleFills(data: WsUserFills): Promise<void> {
     console.log('Received fills:', data.fills);
+    const fill = data.fills[0];
+    if (!fill) return;
+
+    const serviceOrder = memoryStorage.findServiceOrder(fill.oid);
+
+    if (data.fills.length > 1 && !data.isSnapshot) {
+      console.log('Received multiple fills:', data.fills);
+    }
+
+    if (serviceOrder) {
+      console.log('Processing service order fill:', serviceOrder.type);
+
+      if (serviceOrder.type === 'INITIAL_POSITIONS_BUY_UP') {
+        await strategyService.handleInitialPositionsFill(serviceOrder, fill);
+      }
+
+      return;
+    }
 
     // После заполнения ордера - обновляем ордера
     // await this.syncOrders();
@@ -88,37 +106,6 @@ class HyperliquidService {
 
   getCurrentPrice(): number {
     return this.currentPrice;
-  }
-
-  /**
-   * Вычисляет размер ордера в ETH для заданной цены в USDT
-   */
-  private getOrderSizeInEth(ethPrice: number, orderSizeInUsdt: number): number {
-    const usdtAmount = new BigNumber(orderSizeInUsdt);
-    const price = new BigNumber(ethPrice);
-    const orderSize = usdtAmount.dividedBy(price);
-    return orderSize.decimalPlaces(4, BigNumber.ROUND_DOWN).toNumber();
-  }
-
-  /**
-   * Находит индекс следующего грида ВВЕРХ от текущей цены
-   */
-  private findGridIndex(price: number): number {
-    const strategy = memoryStorage.getStrategy();
-    if (!strategy) return -1;
-
-    const grid = strategy.settings.grid;
-
-    // Найти первый грид выше текущей цены
-    for (let i = 0; i < grid.length; i++) {
-      const gridPrice = grid[i];
-      if (gridPrice !== undefined && price < gridPrice) {
-        return i;
-      }
-    }
-
-    // Если цена выше всех гридов
-    return grid.length;
   }
 
   /**
@@ -173,7 +160,7 @@ class HyperliquidService {
     await this.cancelAllOrders();
 
     const grid = strategy.settings.grid;
-    const currentGridIndex = this.findGridIndex(currentPrice);
+    const currentGridIndex = strategyService.findGridIndex(currentPrice);
     const openPositions = memoryStorage.getOpenPositions();
 
     console.log(`Current grid index: ${currentGridIndex}, Open positions: ${openPositions.length}`);
@@ -248,7 +235,7 @@ class HyperliquidService {
     }
 
     const grid = strategy.settings.grid;
-    const currentGridIndex = this.findGridIndex(currentPrice); // Первый грид ВЫШЕ текущей цены
+    const currentGridIndex = strategyService.findGridIndex(currentPrice); // Первый грид ВЫШЕ текущей цены
     const openPositions = memoryStorage.getOpenPositions();
 
     console.log(`Current price: ${currentPrice}, Next grid up index: ${currentGridIndex}, Open positions: ${openPositions.length}`);
@@ -282,28 +269,41 @@ class HyperliquidService {
 
     console.log(`Placing MARKET BUY order for ${totalSizeInUsdt} USDT to open positions for ${grid.length - currentGridIndex} grids above`);
 
-    // Выставляем MARKET ордер
-    // await this.placeMarketBuyOrder(totalSizeInUsdt);
+    const orderResponse = await this.placeBuyOrder(Math.floor(currentPrice) + 100, totalSizeInUsdt);
+
+    if (orderResponse?.status !== 'ok') {
+      console.log('Failed to place buy service order:', orderResponse?.status);
+      return;
+    }
+
+    const filledInfo = orderResponse?.response?.data?.statuses[0]?.filled;
+    memoryStorage.addServiceOrder({
+      id: filledInfo?.oid || 0,
+      type: 'INITIAL_POSITIONS_BUY_UP',
+      side: 'BUY',
+      meta: {
+        initialPrice: currentPrice,
+        numberOfPositions: grid.length - currentGridIndex,
+      },
+    });
   }
 
-  private async placeBuyOrder(price: number, sizeInUsdt: number): Promise<void> {
-    if (!this.sdk) return;
+  private async placeBuyOrder(price: number, sizeInUsdt: number): Promise<OrderResponse | null> {
+    if (!this.sdk) return null;
 
     try {
-      const size = this.getOrderSizeInEth(price, sizeInUsdt);
+      const size = strategyService.getOrderSizeInEth(price, sizeInUsdt);
 
       console.log(`Placing LIMIT BUY order: price=${price}, size=${size} ETH`);
 
-      const orderResponse = await this.sdk.wsPayloads.placeOrders([
-        {
-          coin: 'ETH-PERP',
-          is_buy: true,
-          sz: size,
-          limit_px: price.toString(),
-          order_type: { limit: { tif: 'Gtc' } },
-          reduce_only: false,
-        },
-      ]);
+      const orderResponse = await this.sdk.wsPayloads.placeOrder({
+        coin: 'ETH-PERP',
+        is_buy: true,
+        sz: size,
+        limit_px: price.toString(),
+        order_type: { limit: { tif: 'Gtc' } },
+        reduce_only: false,
+      });
 
       console.log('Buy order response:', JSON.stringify(orderResponse));
 
@@ -312,27 +312,27 @@ class HyperliquidService {
       // if (orderId) {
       //   await this.saveOrderToDB(orderId, size, 'BUY', price);
       // }
+      return orderResponse as OrderResponse;
     } catch (error) {
       console.error('Error placing buy order:', error);
+      return null;
     }
   }
 
-  private async placeSellOrder(price: number, sizeInEth: number, positionId: number): Promise<void> {
-    if (!this.sdk) return;
+  private async placeSellOrder(price: number, sizeInEth: number, positionId: number): Promise<OrderResponse | null> {
+    if (!this.sdk) return null;
 
     try {
       console.log(`Placing SELL order: price=${price}, size=${sizeInEth} ETH, positionId=${positionId}`);
 
-      const orderResponse = await this.sdk.wsPayloads.placeOrders([
-        {
-          coin: 'ETH-PERP',
-          is_buy: false,
-          sz: sizeInEth,
-          limit_px: price.toString(),
-          order_type: { limit: { tif: 'Gtc' } },
-          reduce_only: false,
-        },
-      ]);
+      const orderResponse = await this.sdk.wsPayloads.placeOrder({
+        coin: 'ETH-PERP',
+        is_buy: false,
+        sz: sizeInEth,
+        limit_px: price.toString(),
+        order_type: { limit: { tif: 'Gtc' } },
+        reduce_only: false,
+      });
 
       console.log('Sell order response:', JSON.stringify(orderResponse));
 
@@ -341,8 +341,11 @@ class HyperliquidService {
       // if (orderId) {
       //   await this.saveOrderToDB(orderId, sizeInEth, 'SELL', price, positionId);
       // }
+
+      return orderResponse as OrderResponse;
     } catch (error) {
       console.error('Error placing sell order:', error);
+      return null;
     }
   }
 
@@ -350,6 +353,7 @@ class HyperliquidService {
    * Сохраняет ордер в БД и обновляет память
    * TODO: Будет использоваться после раскомментирования кода в placeBuyOrder/placeSellOrder
    */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private async saveOrderToDB(orderId: number, size: number, side: 'BUY' | 'SELL', price: number, positionId?: number): Promise<void> {
     try {
       const order = await db
