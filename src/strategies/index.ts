@@ -4,6 +4,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
+import strategyRunner from '../services/strategyRunner';
 
 const StrategySchema = z.object({
   minPrice: z.number().min(0, 'Required'),
@@ -96,6 +97,23 @@ app.patch('/:strategyId/toggle', zValidator('json', ToggleEnabledSchema), async 
 
   if (!result[0]) {
     return c.json({ error: 'Strategy not found' }, 404);
+  }
+
+  if (enabled) {
+    try {
+      await strategyRunner.enableStrategy(strategyId);
+    } catch (error) {
+      console.error('Error enabling strategy:', error);
+      return c.json(
+        {
+          error: 'Failed to enable strategy',
+          details: error instanceof Error ? error.message : 'Unknown error',
+        },
+        500,
+      );
+    }
+  } else {
+    await strategyRunner.stop();
   }
 
   return c.json({
