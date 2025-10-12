@@ -20,7 +20,7 @@ export const orders = sqliteTable('orders', {
   status: text('status', {
     enum: ['OPENED', 'CANCELLED', 'FILLED', 'PARTIALLY_FILLED'],
   }).notNull(),
-  price: real('price').notNull(),
+  averagePrice: real('averagePrice').notNull(),
   fee: real('fee').notNull().default(0),
   closedPnl: real('closedPnl').notNull().default(0),
   createdAt: text('created_at').notNull().default(sql`(current_timestamp)`),
@@ -36,7 +36,6 @@ export const fundings = sqliteTable('fundings', {
 
 export const strategies = sqliteTable('strategies', {
   id: text('id').primaryKey(),
-  credentialsId: integer('credentials_id', { mode: 'number' }).references(() => credentials.id),
   enabled: integer('enabled', { mode: 'boolean' }).notNull(),
   settings: text('settings', { mode: 'json' }).notNull(),
   deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
@@ -47,10 +46,12 @@ export const strategies = sqliteTable('strategies', {
   balance: real('balance').notNull().default(0),
 });
 
-export const credentials = sqliteTable('credentials', {
+export const orderSizeLevels = sqliteTable('order_size_levels', {
   id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
-  userId: text('user_id').notNull(),
-  name: text('name').notNull(),
-  exchange: text('exchange', { enum: ['HYPERLIQUID', 'BINANCE'] }).notNull(),
-  data: text('data', { mode: 'json' }).notNull(),
+  strategyId: text('strategy_id')
+    .references(() => strategies.id)
+    .notNull(),
+  size: real('size').notNull().default(0),
+  levelStart: integer('level_start', { mode: 'number' }).notNull(),
+  levelEnd: integer('level_end', { mode: 'number' }).notNull(),
 });

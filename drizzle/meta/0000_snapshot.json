@@ -1,54 +1,9 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "bb53a62c-30d9-49e8-9117-989ecb9436a3",
+  "id": "8637005e-bb2c-4d75-adea-698d2ffafa36",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
-    "credentials": {
-      "name": "credentials",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "integer",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": true
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "exchange": {
-          "name": "exchange",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "data": {
-          "name": "data",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "fundings": {
       "name": "fundings",
       "columns": {
@@ -88,6 +43,66 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "order_size_levels": {
+      "name": "order_size_levels",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "strategy_id": {
+          "name": "strategy_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "size": {
+          "name": "size",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "level_start": {
+          "name": "level_start",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "level_end": {
+          "name": "level_end",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "order_size_levels_strategy_id_strategies_id_fk": {
+          "name": "order_size_levels_strategy_id_strategies_id_fk",
+          "tableFrom": "order_size_levels",
+          "tableTo": "strategies",
+          "columnsFrom": [
+            "strategy_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "orders": {
       "name": "orders",
       "columns": {
@@ -112,6 +127,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "position_id": {
+          "name": "position_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -119,8 +141,8 @@
           "notNull": true,
           "autoincrement": false
         },
-        "price": {
-          "name": "price",
+        "averagePrice": {
+          "name": "averagePrice",
           "type": "real",
           "primaryKey": false,
           "notNull": true,
@@ -159,7 +181,21 @@
         }
       },
       "indexes": {},
-      "foreignKeys": {},
+      "foreignKeys": {
+        "orders_position_id_positions_id_fk": {
+          "name": "orders_position_id_positions_id_fk",
+          "tableFrom": "orders",
+          "tableTo": "positions",
+          "columnsFrom": [
+            "position_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
@@ -194,6 +230,20 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "gridOpenPrice": {
+          "name": "gridOpenPrice",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "gridClosePrice": {
+          "name": "gridClosePrice",
+          "type": "real",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {},
@@ -202,8 +252,12 @@
           "name": "positions_strategy_id_strategies_id_fk",
           "tableFrom": "positions",
           "tableTo": "strategies",
-          "columnsFrom": ["strategy_id"],
-          "columnsTo": ["id"],
+          "columnsFrom": [
+            "strategy_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -220,13 +274,6 @@
           "type": "text",
           "primaryKey": true,
           "notNull": true,
-          "autoincrement": false
-        },
-        "credentials_id": {
-          "name": "credentials_id",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
           "autoincrement": false
         },
         "enabled": {
@@ -291,17 +338,7 @@
         }
       },
       "indexes": {},
-      "foreignKeys": {
-        "strategies_credentials_id_credentials_id_fk": {
-          "name": "strategies_credentials_id_credentials_id_fk",
-          "tableFrom": "strategies",
-          "tableTo": "credentials",
-          "columnsFrom": ["credentials_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
+      "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
