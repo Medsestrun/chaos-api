@@ -1,11 +1,5 @@
-import { Hyperliquid } from 'hyperliquid';
-import { randomBytes } from 'crypto';
 import BigNumber from 'bignumber.js';
-
-const getRandomCloid = (): string => {
-    const bytes = randomBytes(16);
-    return '0x' + bytes.toString('hex');
-}
+import { Hyperliquid } from 'hyperliquid';
 
 /**
  * Calculates order size in ETH for a fixed USDT value of orderSizeInUsdt
@@ -13,28 +7,29 @@ const getRandomCloid = (): string => {
  * @returns Order size in ETH that equals orderSizeInUsdt USDT, rounded to 0.0001 precision
  */
 const getOrderSizeInEth = (ethPrice: number, orderSizeInUsdt = 10.5): number => {
-    const usdtAmount = new BigNumber(orderSizeInUsdt);
-    const price = new BigNumber(ethPrice);
-    const orderSize = usdtAmount.dividedBy(price);
-    return orderSize.decimalPlaces(4, BigNumber.ROUND_DOWN).toNumber();
-}
+  const usdtAmount = new BigNumber(orderSizeInUsdt);
+  const price = new BigNumber(ethPrice);
+  const orderSize = usdtAmount.dividedBy(price);
+  return orderSize.decimalPlaces(4, BigNumber.ROUND_DOWN).toNumber();
+};
 
 async function start() {
-    // Create a new Hyperliquid instance
-    // You can pass a privateKey in the options if you need authenticated access
-    const sdk = new Hyperliquid({ enableWs: true, privateKey: process.env.PRIVATE_KEY });
-  
-    try {
-      // Connect to the WebSocket
-      await sdk.connect();
-      console.log('Connected to WebSocket');
-  
-      // Subscribe to get latest prices for all coins
+  const sdk = new Hyperliquid({
+    enableWs: true,
+    privateKey: process.env.PRIVATE_KEY,
+  });
+
+  try {
+    await sdk.connect();
+    console.log('Connected to WebSocket');
+
+    // Subscribe to get latest prices for all coins
     //   sdk.subscriptions.subscribeToAllMids(data => {
     //     console.log('Received trades data:', data['ETH-PERP']);
     //   });
 
-    const orderResponse = await sdk.wsPayloads.placeOrders([{
+    const orderResponse = await sdk.wsPayloads.placeOrders([
+      {
         coin: 'ETH-PERP',
         is_buy: true,
         sz: 0.0024,
@@ -42,33 +37,29 @@ async function start() {
         order_type: { limit: { tif: 'Gtc' } },
         reduce_only: false,
         // cloid: getRandomCloid(),
-    }]);
+      },
+    ]);
 
     console.log('Order response:', JSON.stringify(orderResponse));
-  
-      // Get updates anytime the user gets new fills
-    sdk.subscriptions.subscribeToUserFills('0x15f4B8BC157702D93180f722c740f2032D500Fd3', data => {
-        console.log('Received user fills data:', data);
+
+    // Get updates anytime the user gets new fills
+    sdk.subscriptions.subscribeToUserFills('0x15f4B8BC157702D93180f722c740f2032D500Fd3', (data) => {
+      console.log('Received user fills data:', data);
     });
 
-    sdk.subscriptions.subscribeToUserFundings('0x15f4B8BC157702D93180f722c740f2032D500Fd3', data => {
-        console.log('Received user fundings data:', data);
+    sdk.subscriptions.subscribeToUserFundings('0x15f4B8BC157702D93180f722c740f2032D500Fd3', (data) => {
+      console.log('Received user fundings data:', data);
     });
 
-    sdk.subscriptions.subscribeToOrderUpdates('0x15f4B8BC157702D93180f722c740f2032D500Fd3', data => {
-        console.log('Received order updates data:', data);
+    sdk.subscriptions.subscribeToOrderUpdates('0x15f4B8BC157702D93180f722c740f2032D500Fd3', (data) => {
+      console.log('Received order updates data:', data);
     });
-  
-      // Get updates on 1 minute ETH-PERP candles
-    //   sdk.subscriptions.subscribeToCandle('ETH-PERP', '1h', data => {
-    //     console.log('Received candle data:', data);
-    //   });
-  
-      // Keep the script running
-      await new Promise(() => {});
-    } catch (error) {
-      console.error('Error:', error);
-    }
+
+    // Keep the script running
+    await new Promise(() => {});
+  } catch (error) {
+    console.error('Error:', error);
+  }
 }
 
 start().catch(console.error);

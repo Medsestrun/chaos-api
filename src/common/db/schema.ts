@@ -1,5 +1,5 @@
-import { sqliteTable, text, integer, real } from 'drizzle-orm/sqlite-core';
 import { sql } from 'drizzle-orm';
+import { integer, real, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 export const positions = sqliteTable('positions', {
   id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
@@ -17,13 +17,13 @@ export const orders = sqliteTable('orders', {
   size: real('size').notNull(),
   side: text('side', { enum: ['BUY', 'SELL'] }).notNull(),
   positionId: integer('position_id', { mode: 'number' }).references(() => positions.id),
-  status: text('status', { enum: ['OPENED', 'CANCELLED', 'FILLED', 'PARTIALLY_FILLED'] }).notNull(),
+  status: text('status', {
+    enum: ['OPENED', 'CANCELLED', 'FILLED', 'PARTIALLY_FILLED'],
+  }).notNull(),
   price: real('price').notNull(),
   fee: real('fee').notNull().default(0),
   closedPnl: real('closedPnl').notNull().default(0),
-  createdAt: text('created_at')
-    .notNull()
-    .default(sql`(current_timestamp)`),
+  createdAt: text('created_at').notNull().default(sql`(current_timestamp)`),
   closedAt: text('closed_at'),
 });
 
@@ -40,9 +40,7 @@ export const strategies = sqliteTable('strategies', {
   enabled: integer('enabled', { mode: 'boolean' }).notNull(),
   settings: text('settings', { mode: 'json' }).notNull(),
   deleted: integer('deleted', { mode: 'boolean' }).notNull().default(false),
-  createdAt: text('created_at')
-    .notNull()
-    .default(sql`(current_timestamp)`),
+  createdAt: text('created_at').notNull().default(sql`(current_timestamp)`),
   startedAt: text('started_at'),
   description: text('description'),
   margin: real('margin').notNull().default(0),
