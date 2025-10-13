@@ -49,18 +49,23 @@ class StrategyService {
       return;
     }
 
-    // Количество позиций для создания
-    const numberOfPositions = grid.length - startGridIndex;
-
     // Общий размер купленной позиции в ETH
     const totalSizeInEth = new BigNumber(fill.sz);
 
-    // Размер одной позиции = общий размер / количество позиций
-    const sizePerPosition = totalSizeInEth.dividedBy(numberOfPositions).decimalPlaces(4, BigNumber.ROUND_DOWN).toNumber();
+    // Рассчитываем общий размер в USDT для всех позиций (с учетом orderSizeLevels)
+    let totalExpectedSizeInUsdt = new BigNumber(0);
+    for (let i = startGridIndex; i < grid.length; i++) {
+      const gridPrice = grid[i];
+      if (gridPrice !== undefined) {
+        const orderSizeUsdt = memoryStorage.getOrderSizeForGrid(gridPrice);
+        totalExpectedSizeInUsdt = totalExpectedSizeInUsdt.plus(orderSizeUsdt);
+      }
+    }
 
-    console.log(`Total size: ${fill.sz} ETH, Positions: ${numberOfPositions}, Size per position: ${sizePerPosition} ETH`);
+    console.log(`Total filled: ${fill.sz} ETH, Expected total: ${totalExpectedSizeInUsdt.toString()} USDT`);
 
     // Создаем позиции для каждого грида выше начальной цены
+    // Размер каждой позиции пропорционален её orderSizeLevel
     const positionsToCreate: Array<{
       strategyId: string;
       size: number;
@@ -73,12 +78,25 @@ class StrategyService {
     for (let i = startGridIndex; i < grid.length; i++) {
       const gridPrice = grid[i];
       if (gridPrice !== undefined) {
+        // Получаем целевой размер для этого грида в USDT
+        const orderSizeUsdt = memoryStorage.getOrderSizeForGrid(gridPrice);
+
+        // Рассчитываем размер позиции пропорционально целевому размеру
+        // sizeInEth = (orderSizeUsdt / totalExpectedSizeInUsdt) * totalSizeInEth
+        const sizeInEth = totalExpectedSizeInUsdt.isZero()
+          ? totalSizeInEth.dividedBy(grid.length - startGridIndex)
+          : new BigNumber(orderSizeUsdt).dividedBy(totalExpectedSizeInUsdt).multipliedBy(totalSizeInEth);
+
+        const roundedSize = sizeInEth.decimalPlaces(4, BigNumber.ROUND_DOWN).toNumber();
+
         // Цена закрытия - следующий грид
         const closeGridPrice = i + 1 < grid.length ? grid[i + 1] : null;
 
+        console.log(`Position for grid ${gridPrice}: ${roundedSize} ETH (target: ${orderSizeUsdt} USDT)`);
+
         positionsToCreate.push({
           strategyId: strategy.id,
-          size: sizePerPosition,
+          size: roundedSize,
           status: 'OPENED',
           gridOpenPrice: gridPrice,
           avgOpenPrice: Number(fill.px),

@@ -82,6 +82,9 @@ class HyperliquidService {
       fillsByOrder.set(fill.oid, existing);
     }
 
+    // Флаг для отслеживания обработки сервисного ордера начальной закупки
+    let processedInitialOrder = false;
+
     // Обрабатываем каждый уникальный ордер
     for (const [oid, fills] of fillsByOrder.entries()) {
       // Берем первый fill для получения основной информации
@@ -108,6 +111,7 @@ class HyperliquidService {
           };
 
           await strategyService.handleInitialPositionsFill(serviceOrder, aggregatedFill);
+          processedInitialOrder = true;
         }
 
         continue;
@@ -148,7 +152,8 @@ class HyperliquidService {
     }
 
     // После обработки всех заполнений - синхронизируем ордера
-    await this.syncOrders();
+    // Если была обработана начальная закупка, гарантируем минимум 1 BUY и 1 SELL ордер
+    await this.syncOrders(processedInitialOrder);
   }
 
   /**
