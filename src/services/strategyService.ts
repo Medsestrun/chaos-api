@@ -181,10 +181,10 @@ class StrategyService {
 
     const grid = strategy.settings.grid;
 
-    // Найти первый грид ниже текущей цены
+    // Найти первый грид <= текущей цены (ближайший снизу или равный)
     for (let i = grid.length - 1; i >= 0; i--) {
       const gridPrice = grid[i];
-      if (gridPrice !== undefined && price > gridPrice) {
+      if (gridPrice !== undefined && price >= gridPrice) {
         return gridPrice;
       }
     }
@@ -369,6 +369,9 @@ class StrategyService {
    * Создает позицию в БД и привязывает к ней ордер
    */
   async handleBuyOrderFill(fill: WsUserFill): Promise<void> {
+    console.log('=== handleBuyOrderFill START ===');
+    console.log('Fill data:', { oid: fill.oid, px: fill.px, sz: fill.sz, fee: fill.fee });
+
     const strategy = memoryStorage.getStrategy();
     if (!strategy) {
       console.error('Strategy not found');
@@ -377,14 +380,27 @@ class StrategyService {
 
     try {
       // Находим ордер в памяти, чтобы получить целевую цену грида
-      const order = memoryStorage.getOrders().find((o) => o.id === fill.oid);
+      const openOrders = memoryStorage.getOrders();
+      console.log(
+        `Open orders in memory: ${openOrders.length}`,
+        openOrders.map((o) => ({ id: o.id, side: o.side, price: o.averagePrice })),
+      );
+
+      const order = openOrders.find((o) => o.id === fill.oid);
 
       if (!order) {
         console.error('Order not found in memory:', fill.oid);
+        console.log(
+          'Available order IDs:',
+          openOrders.map((o) => o.id),
+        );
         return;
       }
 
+      console.log('Found order in memory:', { id: order.id, side: order.side, targetPrice: order.averagePrice });
+
       const grid = strategy.settings.grid;
+      console.log('Grid:', grid);
 
       // Используем целевую цену грида из ордера (averagePrice), а не фактическую цену исполнения
       // Это важно, т.к. LIMIT ордер может исполниться по лучшей цене
@@ -392,8 +408,11 @@ class StrategyService {
 
       if (gridPrice === null) {
         console.error('Grid price not found for target price:', order.averagePrice);
+        console.log('Available grids:', grid);
         return;
       }
+
+      console.log(`Found grid price: ${gridPrice} for target price: ${order.averagePrice}`);
 
       const gridIndex = grid.indexOf(gridPrice);
       const closeGridPrice = gridIndex !== -1 && gridIndex + 1 < grid.length ? grid[gridIndex + 1] : null;

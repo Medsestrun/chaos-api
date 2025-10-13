@@ -1,5 +1,5 @@
 import { inArray } from 'drizzle-orm';
-import { Hyperliquid, type OrderResponse, type WsOrder, type WsUserFills } from 'hyperliquid';
+import { Hyperliquid, type OrderResponse, type WsOrder, type WsUserFills, type WsUserFundings } from 'hyperliquid';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
 import memoryStorage from '../MemoryStorage';
@@ -48,12 +48,18 @@ class HyperliquidService {
       // Подписываемся на заполнение ордеров
       if (this.walletAddress) {
         this.sdk.subscriptions.subscribeToUserFills(this.walletAddress, (fills) => {
-          this.handleFills(fills);
+          if (!fills.isSnapshot) {
+            this.handleFills(fills);
+          }
         });
 
         // Подписываемся на обновления ордеров
         this.sdk.subscriptions.subscribeToOrderUpdates(this.walletAddress, (updates) => {
           this.handleOrderUpdates(updates);
+        });
+
+        this.sdk.subscriptions.subscribeToUserFundings(this.walletAddress, (updates) => {
+          this.handleUserFundings(updates);
         });
       }
 
@@ -62,6 +68,28 @@ class HyperliquidService {
       console.error('Error connecting to Hyperliquid:', error);
       throw error;
     }
+  }
+
+  private async handleUserFundings(data: WsUserFundings): Promise<void> {
+    if (data.isSnapshot) return;
+
+    console.log('Received user fundings:', data);
+
+    memoryStorage.updateBalance(Number(data.fundings[0]?.usdc));
+
+    await Promise.all([
+      db.insert(schema.fundings).values(
+        data.fundings.map((funding) => ({
+          time: funding.time,
+          size: Number(funding.szi),
+          rate: Number(funding.fundingRate),
+          fee: Number(funding.usdc),
+        })),
+      ),
+      db.update(schema.strategies).set({
+        balance: memoryStorage.getBalance(),
+      }),
+    ]);
   }
 
   /**
@@ -248,26 +276,23 @@ class HyperliquidService {
     // При первом запуске гарантируем минимум 1 BUY ордер, даже если грид далеко
     const buyTargets = strategyService.findBuyTargets(currentPrice, 1, ensureMinimum);
 
-    const orderRequests = [];
-
-    // Выставляем BUY ордера
-    for (const target of buyTargets) {
-      orderRequests.push(this.placeBuyOrder(target.price, target.size));
-    }
-
     // Находим открытые позиции для продажи
     // При первом запуске гарантируем минимум 1 SELL ордер, даже если позиция далеко
     const sellTargets = strategyService.findSellTargets(currentPrice, 1, ensureMinimum);
 
-    // Выставляем SELL ордера
-    for (const target of sellTargets) {
-      orderRequests.push(this.placeSellOrder(target.closePrice, target.position.size, target.position.id));
-    }
-
     // Логируем, что будем выставлять
     console.log(`Placing orders: ${buyTargets.length} BUY + ${sellTargets.length} SELL`);
 
-    await Promise.all(orderRequests);
+    // Выставляем ордера ПОСЛЕДОВАТЕЛЬНО, чтобы избежать duplicate nonce
+    // BUY ордера
+    for (const target of buyTargets) {
+      await this.placeBuyOrder(target.price, target.size);
+    }
+
+    // SELL ордера
+    for (const target of sellTargets) {
+      await this.placeSellOrder(target.closePrice, target.position.size, target.position.id);
+    }
   }
 
   /**
@@ -321,7 +346,7 @@ class HyperliquidService {
       return;
     }
 
-    console.log(`Placing MARKET BUY order for ${totalSizeInUsdt} USDT to open positions for ${grid.length - currentGridIndex} grids above`);
+    console.log(`Placing BUY order for ${totalSizeInUsdt} USDT to open positions for ${grid.length - currentGridIndex} grids above`);
 
     try {
       const orderResponse = await this.placeBuyOrder(Math.floor(currentPrice) + 100, totalSizeInUsdt, true);
