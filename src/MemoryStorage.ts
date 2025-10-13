@@ -125,6 +125,10 @@ class MemoryStorage {
     }
   }
 
+  removePosition(id: number): void {
+    this.positions.delete(id);
+  }
+
   setOrders(orders: Order[]): void {
     this.orders.clear();
     for (const order of orders) {

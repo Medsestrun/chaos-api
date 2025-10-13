@@ -45,9 +45,9 @@ class StrategyRunner {
       await hyperliquidService.openInitialPositions();
       // НЕ вызываем syncOrders - он сработает автоматически после заполнения начального ордера
     } else {
-      // Есть позиции: работаем в обычном режиме
-      console.log('Positions exist: syncing orders in normal mode');
-      await hyperliquidService.syncOrders();
+      // Есть позиции: работаем в обычном режиме с гарантией минимум 1 BUY и 1 SELL
+      console.log('Positions exist: syncing orders with minimum guarantee');
+      await hyperliquidService.syncOrders(true);
     }
 
     this.isRunning = true;

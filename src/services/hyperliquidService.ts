@@ -69,27 +69,86 @@ class HyperliquidService {
    */
   private async handleFills(data: WsUserFills): Promise<void> {
     console.log('Received fills:', data.fills);
-    const fill = data.fills[0];
-    if (!fill) return;
-
-    const serviceOrder = memoryStorage.findServiceOrder(fill.oid);
 
     if (data.fills.length > 1 && !data.isSnapshot) {
       console.log('Received multiple fills:', data.fills);
     }
 
-    if (serviceOrder) {
-      console.log('Processing service order fill:', serviceOrder.type);
-
-      if (serviceOrder.type === 'INITIAL_POSITIONS_BUY_UP') {
-        await strategyService.handleInitialPositionsFill(serviceOrder, fill);
-      }
-
-      return;
+    // Группируем fills по oid (один ордер может иметь несколько fills)
+    const fillsByOrder = new Map<number, typeof data.fills>();
+    for (const fill of data.fills) {
+      const existing = fillsByOrder.get(fill.oid) || [];
+      existing.push(fill);
+      fillsByOrder.set(fill.oid, existing);
     }
 
-    // После заполнения ордера - обновляем ордера
-    // await this.syncOrders();
+    // Обрабатываем каждый уникальный ордер
+    for (const [oid, fills] of fillsByOrder.entries()) {
+      // Берем первый fill для получения основной информации
+      const firstFill = fills[0];
+      if (!firstFill) continue;
+
+      // Проверяем, является ли это сервисным ордером
+      const serviceOrder = memoryStorage.findServiceOrder(oid);
+
+      if (serviceOrder) {
+        console.log('Processing service order fill:', serviceOrder.type);
+
+        if (serviceOrder.type === 'INITIAL_POSITIONS_BUY_UP') {
+          // Для сервисного ордера суммируем все fills
+          const totalSize = fills.reduce((sum, f) => sum + Number(f.sz), 0);
+          const totalFee = fills.reduce((sum, f) => sum + Number(f.fee), 0);
+          const avgPrice = fills.reduce((sum, f) => sum + Number(f.px) * Number(f.sz), 0) / totalSize;
+
+          const aggregatedFill = {
+            ...firstFill,
+            sz: totalSize.toString(),
+            fee: totalFee.toString(),
+            px: avgPrice.toString(),
+          };
+
+          await strategyService.handleInitialPositionsFill(serviceOrder, aggregatedFill);
+        }
+
+        continue;
+      }
+
+      // Проверяем, не обработали ли мы уже этот ордер
+      const existingOrder = memoryStorage.getOrders().find((o) => o.id === oid);
+      if (!existingOrder) {
+        console.log(`Order ${oid} not found in memory, skipping fill processing`);
+        continue;
+      }
+
+      if (existingOrder.status === 'FILLED') {
+        console.log(`Order ${oid} already filled, skipping`);
+        continue;
+      }
+
+      // Суммируем все fills для этого ордера
+      const totalSize = fills.reduce((sum, f) => sum + Number(f.sz), 0);
+      const totalFee = fills.reduce((sum, f) => sum + Number(f.fee), 0);
+      const avgPrice = fills.reduce((sum, f) => sum + Number(f.px) * Number(f.sz), 0) / totalSize;
+
+      const aggregatedFill = {
+        ...firstFill,
+        sz: totalSize.toString(),
+        fee: totalFee.toString(),
+        px: avgPrice.toString(),
+      };
+
+      // Обрабатываем обычные ордера
+      if (firstFill.side === 'B') {
+        // BUY ордер - создаем позицию
+        await strategyService.handleBuyOrderFill(aggregatedFill);
+      } else if (firstFill.side === 'A') {
+        // SELL ордер - закрываем позицию
+        await strategyService.handleSellOrderFill(aggregatedFill);
+      }
+    }
+
+    // После обработки всех заполнений - синхронизируем ордера
+    await this.syncOrders();
   }
 
   /**
@@ -110,36 +169,58 @@ class HyperliquidService {
    * Отменяет все открытые ордера
    */
   private async cancelAllOrders(): Promise<void> {
+    if (!this.sdk) {
+      console.error('SDK not initialized');
+      return;
+    }
+
     const openOrders = memoryStorage.getOpenOrders();
-    if (openOrders.length === 0) return;
+    if (openOrders.length === 0) {
+      console.log('No open orders to cancel');
+      return;
+    }
 
-    console.log(`Cancelling ${openOrders.length} open orders`);
+    console.log(`Cancelling ${openOrders.length} open orders for ETH-PERP`);
 
-    await this.sdk?.wsPayloads.cancelAllOrders();
+    try {
+      const response = await this.sdk.wsPayloads.cancelAllOrders();
+      console.log('Cancel orders response:', response);
 
-    // TODO: Некоторые могут быть частично заполнены, нужно обработать этот случай
+      // Проверяем статус ответа
+      if (response?.status !== 'ok') {
+        console.error('Failed to cancel orders:', response);
+        return;
+      }
 
-    await db
-      .update(schema.orders)
-      .set({ status: 'CANCELLED' })
-      .where(
-        inArray(
-          schema.orders.id,
-          openOrders.map((order) => order.id),
-        ),
-      );
+      // Обновляем статус в БД
+      await db
+        .update(schema.orders)
+        .set({
+          status: 'CANCELLED',
+          closedAt: new Date().toISOString(),
+        })
+        .where(
+          inArray(
+            schema.orders.id,
+            openOrders.map((order) => order.id),
+          ),
+        );
 
-    // Очищаем открытые ордера в памяти
-    memoryStorage.setOrders([]);
+      // Очищаем открытые ордера в памяти
+      memoryStorage.setOrders([]);
 
-    console.log('All orders cancelled');
+      console.log(`Successfully cancelled ${openOrders.length} orders`);
+    } catch (error) {
+      console.error('Error cancelling orders:', error);
+      // Не обновляем БД и память, если отмена не удалась
+    }
   }
 
   /**
    * Проверяет открытые позиции и выставляет необходимые ордера
-   * @param numberOfOrders - количество BUY и SELL ордеров для выставления (если не указано, берется из настроек стратегии, по умолчанию 2)
+   * @param ensureMinimum - гарантировать минимум 1 BUY и 1 SELL ордер (для первого запуска)
    */
-  async syncOrders(): Promise<void> {
+  async syncOrders(ensureMinimum = false): Promise<void> {
     const strategy = memoryStorage.getStrategy();
     if (!strategy || !this.isConnected || !this.sdk) {
       console.log('Strategy not loaded or not connected');
@@ -153,13 +234,14 @@ class HyperliquidService {
     }
 
     // Отменяем все текущие ордера
-    // await this.cancelAllOrders();
+    await this.cancelAllOrders();
 
     const openPositions = memoryStorage.getOpenPositions();
-    console.log(`Open positions: ${openPositions.length}`);
+    console.log(`Open positions: ${openPositions.length}${ensureMinimum ? ' (ensuring minimum orders)' : ''}`);
 
     // Находим грида для покупки
-    const buyTargets = strategyService.findBuyTargets(currentPrice);
+    // При первом запуске гарантируем минимум 1 BUY ордер, даже если грид далеко
+    const buyTargets = strategyService.findBuyTargets(currentPrice, 1, ensureMinimum);
 
     const orderRequests = [];
 
@@ -169,12 +251,16 @@ class HyperliquidService {
     }
 
     // Находим открытые позиции для продажи
-    const sellTargets = strategyService.findSellTargets(currentPrice);
+    // При первом запуске гарантируем минимум 1 SELL ордер, даже если позиция далеко
+    const sellTargets = strategyService.findSellTargets(currentPrice, 1, ensureMinimum);
 
     // Выставляем SELL ордера
     for (const target of sellTargets) {
       orderRequests.push(this.placeSellOrder(target.closePrice, target.position.size, target.position.id));
     }
+
+    // Логируем, что будем выставлять
+    console.log(`Placing orders: ${buyTargets.length} BUY + ${sellTargets.length} SELL`);
 
     await Promise.all(orderRequests);
   }
@@ -261,34 +347,28 @@ class HyperliquidService {
     try {
       const size = strategyService.getOrderSizeInEth(price, sizeInUsdt);
 
-      console.log(`Placing LIMIT BUY order: price=${price}, size=${size} ETH`);
+      // Округляем price до 1 знака, size уже округлен в getOrderSizeInEth до 4 знаков
+      const roundedPrice = strategyService.roundPrice(price);
+
+      console.log(`Placing LIMIT BUY order: price=${roundedPrice}, size=${size} ETH`);
 
       const orderResponse = await this.sdk.wsPayloads.placeOrder({
         coin: 'ETH-PERP',
         is_buy: true,
         sz: size,
-        limit_px: price.toString(),
+        limit_px: roundedPrice.toString(),
         order_type: { limit: { tif: 'Gtc' } },
         reduce_only: false,
       });
 
       console.log('Buy order response:', JSON.stringify(orderResponse));
 
-      if (!isServiceOrder) {
+      // Сохраняем ордер в БД, если это не сервисный ордер
+      if (!isServiceOrder && orderResponse?.status === 'ok') {
         const orderId = strategyService.getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
-
-        await strategyService.saveOrderToDB('OPEN', {
-          id: orderId || 0,
-          size: size,
-          side: 'BUY',
-          averagePrice: price,
-          fee: 0,
-          status: 'OPENED',
-          positionId: null,
-          closedPnl: 0,
-          closedAt: null,
-          createdAt: new Date().toISOString(),
-        });
+        if (orderId) {
+          await strategyService.saveOpenedOrderToDB(orderId, size, 'BUY', roundedPrice);
+        }
       }
 
       return orderResponse as OrderResponse;
@@ -302,24 +382,30 @@ class HyperliquidService {
     if (!this.sdk) return null;
 
     try {
-      console.log(`Placing SELL order: price=${price}, size=${sizeInEth} ETH, positionId=${positionId}`);
+      // Округляем price до 1 знака, size до 4 знаков
+      const roundedPrice = strategyService.roundPrice(price);
+      const roundedSize = strategyService.roundSize(sizeInEth);
+
+      console.log(`Placing SELL order: price=${roundedPrice}, size=${roundedSize} ETH, positionId=${positionId}`);
 
       const orderResponse = await this.sdk.wsPayloads.placeOrder({
         coin: 'ETH-PERP',
         is_buy: false,
-        sz: sizeInEth,
-        limit_px: price.toString(),
+        sz: roundedSize,
+        limit_px: roundedPrice.toString(),
         order_type: { limit: { tif: 'Gtc' } },
         reduce_only: false,
       });
 
       console.log('Sell order response:', JSON.stringify(orderResponse));
 
-      // TODO: Извлечь ID ордера из ответа и сохранить в БД
-      // const orderId = orderResponse.data?.orderId;
-      // if (orderId) {
-      //   await this.saveOrderToDB(orderId, sizeInEth, 'SELL', price, positionId);
-      // }
+      // Сохраняем ордер в БД
+      if (orderResponse?.status === 'ok') {
+        const orderId = strategyService.getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
+        if (orderId) {
+          await strategyService.saveOpenedOrderToDB(orderId, roundedSize, 'SELL', roundedPrice, positionId);
+        }
+      }
 
       return orderResponse as OrderResponse;
     } catch (error) {

@@ -1,4 +1,5 @@
 import { zValidator } from '@hono/zod-validator';
+import BigNumber from 'bignumber.js';
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { z } from 'zod';
@@ -38,15 +39,18 @@ const calculateGrid = (config: Grid): number[] => {
   const { minPrice, maxPrice, numberOfGrids } = config;
 
   if (numberOfGrids === 1) {
-    return [Math.floor((minPrice + maxPrice) / 2)];
+    const midPrice = new BigNumber(minPrice).plus(maxPrice).dividedBy(2);
+    return [midPrice.decimalPlaces(1, BigNumber.ROUND_DOWN).toNumber()];
   }
 
-  const stepSize = (maxPrice - minPrice) / (numberOfGrids - 1);
+  const min = new BigNumber(minPrice);
+  const max = new BigNumber(maxPrice);
+  const stepSize = max.minus(min).dividedBy(numberOfGrids - 1);
 
   const grids: number[] = [];
   for (let i = 0; i < numberOfGrids; i++) {
-    const price = Math.floor(minPrice + stepSize * i);
-    grids.push(price);
+    const price = min.plus(stepSize.multipliedBy(i));
+    grids.push(price.decimalPlaces(1, BigNumber.ROUND_DOWN).toNumber());
   }
 
   return grids;
