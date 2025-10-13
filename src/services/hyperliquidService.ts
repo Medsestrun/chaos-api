@@ -5,8 +5,6 @@ import * as schema from '../common/db/schema';
 import memoryStorage from '../MemoryStorage';
 import strategyService from './strategyService';
 
-type Order = typeof schema.orders.$inferSelect;
-
 class HyperliquidService {
   private static instance: HyperliquidService;
   private sdk: Hyperliquid | null = null;
@@ -139,7 +137,7 @@ class HyperliquidService {
 
   /**
    * Проверяет открытые позиции и выставляет необходимые ордера
-   * Выставляет только 2 BUY и 2 SELL ордера
+   * @param numberOfOrders - количество BUY и SELL ордеров для выставления (если не указано, берется из настроек стратегии, по умолчанию 2)
    */
   async syncOrders(): Promise<void> {
     const strategy = memoryStorage.getStrategy();
@@ -154,66 +152,31 @@ class HyperliquidService {
       return;
     }
 
-    console.log(`Syncing orders at price: ${currentPrice}`);
-
     // Отменяем все текущие ордера
-    await this.cancelAllOrders();
+    // await this.cancelAllOrders();
 
-    const grid = strategy.settings.grid;
-    const currentGridIndex = strategyService.findGridIndex(currentPrice);
     const openPositions = memoryStorage.getOpenPositions();
+    console.log(`Open positions: ${openPositions.length}`);
 
-    console.log(`Current grid index: ${currentGridIndex}, Open positions: ${openPositions.length}`);
+    // Находим грида для покупки
+    const buyTargets = strategyService.findBuyTargets(currentPrice);
 
-    // Создаем Map открытых позиций по цене грида
-    const positionsByGrid = new Map<number, (typeof openPositions)[0]>();
-    for (const position of openPositions) {
-      const gridIndex = grid.indexOf(position.gridOpenPrice);
-      if (gridIndex !== -1) {
-        positionsByGrid.set(gridIndex, position);
-      }
-    }
-
-    // Находим 2 ближайших грида ниже текущей цены без открытых позиций
-    const buyTargets: Array<{ gridIndex: number; price: number; size: number }> = [];
-    for (let i = currentGridIndex - 1; i >= 0 && buyTargets.length < 2; i--) {
-      const gridPrice = grid[i];
-      const hasPosition = positionsByGrid.has(i);
-
-      if (!hasPosition && gridPrice !== undefined) {
-        const orderSize = memoryStorage.getOrderSizeForGrid(i);
-        if (orderSize > 0) {
-          buyTargets.push({ gridIndex: i, price: gridPrice, size: orderSize });
-        }
-      }
-    }
+    const orderRequests = [];
 
     // Выставляем BUY ордера
-    console.log(`Placing ${buyTargets.length} BUY orders`);
     for (const target of buyTargets) {
-      await this.placeBuyOrder(target.price, target.size);
+      orderRequests.push(this.placeBuyOrder(target.price, target.size));
     }
 
-    // Находим 2 ближайших открытых позиции для продажи
-    const sellTargets: Array<{ position: (typeof openPositions)[0]; closePrice: number }> = [];
-    for (let i = currentGridIndex - 1; i >= 0 && sellTargets.length < 2; i--) {
-      const position = positionsByGrid.get(i);
-      if (position) {
-        const closeGridIndex = i + 1;
-        if (closeGridIndex < grid.length) {
-          const closePrice = grid[closeGridIndex];
-          if (closePrice !== undefined) {
-            sellTargets.push({ position, closePrice });
-          }
-        }
-      }
-    }
+    // Находим открытые позиции для продажи
+    const sellTargets = strategyService.findSellTargets(currentPrice);
 
     // Выставляем SELL ордера
-    console.log(`Placing ${sellTargets.length} SELL orders`);
     for (const target of sellTargets) {
-      await this.placeSellOrder(target.closePrice, target.position.size, target.position.id);
+      orderRequests.push(this.placeSellOrder(target.closePrice, target.position.size, target.position.id));
     }
+
+    await Promise.all(orderRequests);
   }
 
   /**
@@ -235,7 +198,7 @@ class HyperliquidService {
     }
 
     const grid = strategy.settings.grid;
-    const currentGridIndex = strategyService.findGridIndex(currentPrice); // Первый грид ВЫШЕ текущей цены
+    const currentGridIndex = strategyService.findGridUpperIndex(currentPrice); // Первый грид ВЫШЕ текущей цены
     const openPositions = memoryStorage.getOpenPositions();
 
     console.log(`Current price: ${currentPrice}, Next grid up index: ${currentGridIndex}, Open positions: ${openPositions.length}`);
@@ -269,26 +232,30 @@ class HyperliquidService {
 
     console.log(`Placing MARKET BUY order for ${totalSizeInUsdt} USDT to open positions for ${grid.length - currentGridIndex} grids above`);
 
-    const orderResponse = await this.placeBuyOrder(Math.floor(currentPrice) + 100, totalSizeInUsdt);
+    try {
+      const orderResponse = await this.placeBuyOrder(Math.floor(currentPrice) + 100, totalSizeInUsdt, true);
 
-    if (orderResponse?.status !== 'ok') {
-      console.log('Failed to place buy service order:', orderResponse?.status);
-      return;
+      if (orderResponse?.status !== 'ok' || !orderResponse?.response?.data?.statuses[0]) {
+        throw new Error(`Failed to place buy service order: ${orderResponse?.status}`);
+      }
+
+      const orderId = strategyService.getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
+      memoryStorage.addServiceOrder({
+        id: orderId || 0,
+        type: 'INITIAL_POSITIONS_BUY_UP',
+        side: 'BUY',
+        meta: {
+          initialPrice: currentPrice,
+          numberOfPositions: grid.length - currentGridIndex,
+        },
+      });
+    } catch (error) {
+      console.error('Error placing initial positions buy order:', error);
+      this.openInitialPositions();
     }
-
-    const filledInfo = orderResponse?.response?.data?.statuses[0]?.filled;
-    memoryStorage.addServiceOrder({
-      id: filledInfo?.oid || 0,
-      type: 'INITIAL_POSITIONS_BUY_UP',
-      side: 'BUY',
-      meta: {
-        initialPrice: currentPrice,
-        numberOfPositions: grid.length - currentGridIndex,
-      },
-    });
   }
 
-  private async placeBuyOrder(price: number, sizeInUsdt: number): Promise<OrderResponse | null> {
+  private async placeBuyOrder(price: number, sizeInUsdt: number, isServiceOrder = false): Promise<OrderResponse | null> {
     if (!this.sdk) return null;
 
     try {
@@ -307,15 +274,27 @@ class HyperliquidService {
 
       console.log('Buy order response:', JSON.stringify(orderResponse));
 
-      // TODO: Извлечь ID ордера из ответа и сохранить в БД
-      // const orderId = orderResponse.data?.orderId;
-      // if (orderId) {
-      //   await this.saveOrderToDB(orderId, size, 'BUY', price);
-      // }
+      if (!isServiceOrder) {
+        const orderId = strategyService.getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
+
+        await strategyService.saveOrderToDB('OPEN', {
+          id: orderId || 0,
+          size: size,
+          side: 'BUY',
+          averagePrice: price,
+          fee: 0,
+          status: 'OPENED',
+          positionId: null,
+          closedPnl: 0,
+          closedAt: null,
+          createdAt: new Date().toISOString(),
+        });
+      }
+
       return orderResponse as OrderResponse;
     } catch (error) {
       console.error('Error placing buy order:', error);
-      return null;
+      throw error;
     }
   }
 
@@ -345,37 +324,7 @@ class HyperliquidService {
       return orderResponse as OrderResponse;
     } catch (error) {
       console.error('Error placing sell order:', error);
-      return null;
-    }
-  }
-
-  /**
-   * Сохраняет ордер в БД и обновляет память
-   * TODO: Будет использоваться после раскомментирования кода в placeBuyOrder/placeSellOrder
-   */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  private async saveOrderToDB(orderId: number, size: number, side: 'BUY' | 'SELL', price: number, positionId?: number): Promise<void> {
-    try {
-      const order = await db
-        .insert(schema.orders)
-        .values({
-          id: orderId,
-          size,
-          side,
-          positionId: positionId || null,
-          status: 'OPENED',
-          averagePrice: price,
-          fee: 0,
-          closedPnl: 0,
-        })
-        .returning();
-
-      if (order[0]) {
-        memoryStorage.addOrder(order[0] as Order);
-        console.log(`Order ${orderId} saved to DB and memory`);
-      }
-    } catch (error) {
-      console.error('Error saving order to DB:', error);
+      throw error;
     }
   }
 

@@ -163,6 +163,10 @@ class MemoryStorage {
     return this.getOrders().filter((o) => o.status === 'OPENED');
   }
 
+  removeOrder(id: number): void {
+    this.orders.delete(id);
+  }
+
   addOrder(order: Order): void {
     this.orders.set(order.id, order);
   }

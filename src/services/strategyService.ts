@@ -1,9 +1,11 @@
 import BigNumber from 'bignumber.js';
 import { eq } from 'drizzle-orm';
-import type { WsUserFill } from 'hyperliquid';
+import type { OrderResponse, WsUserFill } from 'hyperliquid';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
 import memoryStorage from '../MemoryStorage';
+
+type Order = typeof schema.orders.$inferSelect;
 
 class StrategyService {
   private static instance: StrategyService;
@@ -42,7 +44,7 @@ class StrategyService {
     const grid = strategy.settings.grid;
 
     // Находим первый грид выше начальной цены
-    const startGridIndex = this.findGridIndex(initialPrice);
+    const startGridIndex = this.findGridUpperIndex(initialPrice);
 
     if (startGridIndex === -1 || startGridIndex >= grid.length) {
       console.error('Invalid grid index');
@@ -115,7 +117,7 @@ class StrategyService {
     // await this.syncOrders();
   }
 
-  findGridIndex(price: number): number {
+  findGridUpperIndex(price: number): number {
     const strategy = memoryStorage.getStrategy();
     if (!strategy) return -1;
 
@@ -141,6 +143,215 @@ class StrategyService {
     const price = new BigNumber(ethPrice);
     const orderSize = usdtAmount.dividedBy(price);
     return orderSize.decimalPlaces(4, BigNumber.ROUND_DOWN).toNumber();
+  }
+
+  findFirstGridLower(price: number): number | null {
+    const strategy = memoryStorage.getStrategy();
+    if (!strategy) return null;
+
+    const grid = strategy.settings.grid;
+
+    // Найти первый грид ниже текущей цены
+    for (let i = grid.length - 1; i >= 0; i--) {
+      const gridPrice = grid[i];
+      if (gridPrice !== undefined && price > gridPrice) {
+        return gridPrice;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Находит грида для покупки (без открытых позиций и без открытых BUY ордеров, ниже текущей цены)
+   * @param currentPrice - текущая цена
+   * @param limit - максимальное количество целей для покупки
+   * @returns массив целей с индексом грида, ценой и размером
+   */
+  findBuyTargets(currentPrice: number, limit = 1): Array<{ gridIndex: number; price: number; size: number }> {
+    const strategy = memoryStorage.getStrategy();
+    if (!strategy) return [];
+
+    const grid = strategy.settings.grid;
+    const currentGridIndex = this.findGridUpperIndex(currentPrice);
+    const openPositions = memoryStorage.getOpenPositions();
+    const openOrders = memoryStorage.getOpenOrders();
+
+    // Создаем Map открытых позиций по индексу грида
+    const positionsByGrid = new Map<number, (typeof openPositions)[0]>();
+    for (const position of openPositions) {
+      const gridIndex = grid.indexOf(position.gridOpenPrice);
+      if (gridIndex !== -1) {
+        positionsByGrid.set(gridIndex, position);
+      }
+    }
+
+    // Создаем Set цен, на которые уже открыты BUY ордера
+    const buyOrderPrices = new Set<number>();
+    for (const order of openOrders) {
+      if (order.side === 'BUY') {
+        buyOrderPrices.add(order.averagePrice);
+      }
+    }
+
+    // Находим ближайших грида ниже текущей цены без открытых позиций и ордеров
+    const buyTargets: Array<{ gridIndex: number; price: number; size: number }> = [];
+    for (let i = currentGridIndex - 1; i >= 0 && buyTargets.length < limit; i--) {
+      const gridPrice = grid[i];
+      const hasPosition = positionsByGrid.has(i);
+      const hasOpenOrder = gridPrice !== undefined && buyOrderPrices.has(gridPrice);
+
+      if (!hasPosition && !hasOpenOrder && gridPrice !== undefined) {
+        const orderSize = memoryStorage.getOrderSizeForGrid(gridPrice);
+        if (orderSize > 0) {
+          buyTargets.push({ gridIndex: i, price: gridPrice, size: orderSize });
+        }
+      }
+    }
+
+    return buyTargets;
+  }
+
+  /**
+   * Находит открытые позиции для продажи (без открытых SELL ордеров на эти позиции)
+   * @param currentPrice - текущая цена
+   * @param limit - максимальное количество целей для продажи
+   * @returns массив целей с позицией и ценой закрытия
+   */
+  findSellTargets(currentPrice: number, limit = 1): Array<{ position: typeof schema.positions.$inferSelect; closePrice: number }> {
+    const strategy = memoryStorage.getStrategy();
+    if (!strategy) return [];
+
+    const grid = strategy.settings.grid;
+    const currentGridIndex = this.findGridUpperIndex(currentPrice);
+    const openPositions = memoryStorage.getOpenPositions();
+    const openOrders = memoryStorage.getOpenOrders();
+
+    // Создаем Map открытых позиций по индексу грида
+    const positionsByGrid = new Map<number, (typeof openPositions)[0]>();
+    for (const position of openPositions) {
+      const gridIndex = grid.indexOf(position.gridOpenPrice);
+      if (gridIndex !== -1) {
+        positionsByGrid.set(gridIndex, position);
+      }
+    }
+
+    // Создаем Set ID позиций, на которые уже открыты SELL ордера
+    const positionsWithSellOrders = new Set<number>();
+    for (const order of openOrders) {
+      if (order.side === 'SELL' && order.positionId !== null) {
+        positionsWithSellOrders.add(order.positionId);
+      }
+    }
+
+    // Находим ближайших открытых позиции для продажи без открытых SELL ордеров
+    const sellTargets: Array<{ position: (typeof openPositions)[0]; closePrice: number }> = [];
+    for (let i = currentGridIndex - 1; i >= 0 && sellTargets.length < limit; i--) {
+      const position = positionsByGrid.get(i);
+      if (position && !positionsWithSellOrders.has(position.id)) {
+        const closeGridIndex = i + 1;
+        if (closeGridIndex < grid.length) {
+          const closePrice = grid[closeGridIndex];
+          if (closePrice !== undefined) {
+            sellTargets.push({ position, closePrice });
+          }
+        }
+      }
+    }
+
+    return sellTargets;
+  }
+
+  /**
+   * Сохраняет ордер в БД и обновляет память
+   * TODO: Будет использоваться после раскомментирования кода в placeBuyOrder/placeSellOrder
+   */
+  async saveOrderToDB(type: 'OPEN' | 'CLOSE', order: Order): Promise<void> {
+    try {
+      if (type === 'OPEN') {
+        const createdOrder = await db
+          .insert(schema.orders)
+          .values({
+            id: order.id,
+            size: order.size,
+            side: order.side,
+            //   positionId: positionId || null,
+            positionId: null,
+            status: 'OPENED',
+            averagePrice: order.averagePrice,
+            fee: 0,
+            closedPnl: 0,
+          })
+          .returning();
+
+        if (createdOrder[0]) {
+          memoryStorage.addOrder(createdOrder[0] as Order);
+          console.log(`Order ${order.id} opened`);
+        }
+      } else {
+        await db
+          .update(schema.orders)
+          .set({
+            status: 'FILLED',
+            closedAt: new Date().toISOString(),
+            fee: order.fee,
+            closedPnl: order.closedPnl,
+            averagePrice: order.averagePrice,
+          })
+          .where(eq(schema.orders.id, order.id));
+
+        memoryStorage.updateBalance(order.closedPnl);
+        memoryStorage.updateBalance(-Number(order.fee));
+
+        await db
+          .update(schema.strategies)
+          .set({
+            balance: memoryStorage.getBalance(),
+          })
+          .where(eq(schema.strategies.id, memoryStorage.getStrategy()?.id || ''));
+
+        memoryStorage.removeOrder(order.id);
+        console.log(`Order ${order.id} closed`);
+      }
+    } catch (error) {
+      console.error('Error saving order to DB:', error);
+    }
+  }
+
+  /**
+   * Извлекает ID ордера из одного статуса
+   * @param status - элемент из массива statuses
+   * @returns ID ордера или null
+   * @example
+   * const orderResponse = await sdk.placeOrder(...);
+   * for (const status of orderResponse.response.data.statuses) {
+   *   const orderId = strategyService.getOrderIdFromStatus(status);
+   *   if (orderId) {
+   *     console.log('Order ID:', orderId);
+   *   }
+   * }
+   */
+  getOrderIdFromStatus(status: OrderResponse['response']['data']['statuses'][0]): number | null {
+    return status?.filled?.oid || status?.resting?.oid || null;
+  }
+
+  /**
+   * Извлекает все ID ордеров из ответа биржи
+   * @param orderData - данные ответа от биржи
+   * @returns массив ID ордеров
+   */
+  getAllOrderIdsFromResponse(orderData: OrderResponse['response']['data']): number[] {
+    if (!orderData?.statuses) return [];
+
+    const orderIds: number[] = [];
+    for (const status of orderData.statuses) {
+      const orderId = this.getOrderIdFromStatus(status);
+      if (orderId !== null) {
+        orderIds.push(orderId);
+      }
+    }
+
+    return orderIds;
   }
 }
 
