@@ -2,6 +2,7 @@ import { inArray } from 'drizzle-orm';
 import { Hyperliquid, type OrderResponse, type WsOrder, type WsUserFills, type WsUserFundings } from 'hyperliquid';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
+import { getOrderIdFromStatus, getOrderSizeInEth, roundPrice, roundSize } from '../common/utils';
 import memoryStorage from '../MemoryStorage';
 import strategyService from './strategyService';
 
@@ -355,7 +356,7 @@ class HyperliquidService {
         throw new Error(`Failed to place buy service order: ${orderResponse?.status}`);
       }
 
-      const orderId = strategyService.getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
+      const orderId = getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
       memoryStorage.addServiceOrder({
         id: orderId || 0,
         type: 'INITIAL_POSITIONS_BUY_UP',
@@ -375,10 +376,8 @@ class HyperliquidService {
     if (!this.sdk) return null;
 
     try {
-      const size = strategyService.getOrderSizeInEth(price, sizeInUsdt);
-
-      // Округляем price до 1 знака, size уже округлен в getOrderSizeInEth до 4 знаков
-      const roundedPrice = strategyService.roundPrice(price);
+      const size = getOrderSizeInEth(price, sizeInUsdt);
+      const roundedPrice = roundPrice(price);
 
       console.log(`Placing LIMIT BUY order: price=${roundedPrice}, size=${size} ETH`);
 
@@ -393,9 +392,8 @@ class HyperliquidService {
 
       console.log('Buy order response:', JSON.stringify(orderResponse));
 
-      // Сохраняем ордер в БД, если это не сервисный ордер
       if (!isServiceOrder && orderResponse?.status === 'ok') {
-        const orderId = strategyService.getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
+        const orderId = getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
         if (orderId) {
           await strategyService.saveOpenedOrderToDB(orderId, size, 'BUY', roundedPrice);
         }
@@ -412,9 +410,8 @@ class HyperliquidService {
     if (!this.sdk) return null;
 
     try {
-      // Округляем price до 1 знака, size до 4 знаков
-      const roundedPrice = strategyService.roundPrice(price);
-      const roundedSize = strategyService.roundSize(sizeInEth);
+      const roundedPrice = roundPrice(price);
+      const roundedSize = roundSize(sizeInEth);
 
       console.log(`Placing SELL order: price=${roundedPrice}, size=${roundedSize} ETH, positionId=${positionId}`);
 
@@ -429,9 +426,8 @@ class HyperliquidService {
 
       console.log('Sell order response:', JSON.stringify(orderResponse));
 
-      // Сохраняем ордер в БД
       if (orderResponse?.status === 'ok') {
-        const orderId = strategyService.getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
+        const orderId = getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
         if (orderId) {
           await strategyService.saveOpenedOrderToDB(orderId, roundedSize, 'SELL', roundedPrice, positionId);
         }

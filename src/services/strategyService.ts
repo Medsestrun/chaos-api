@@ -1,6 +1,6 @@
 import BigNumber from 'bignumber.js';
 import { eq } from 'drizzle-orm';
-import type { OrderResponse, WsUserFill } from 'hyperliquid';
+import type { WsUserFill } from 'hyperliquid';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
 import memoryStorage from '../MemoryStorage';
@@ -17,10 +17,6 @@ class StrategyService {
     return StrategyService.instance;
   }
 
-  /**
-   * Обрабатывает заполнение сервисного ордера INITIAL_POSITIONS_BUY_UP
-   * Создает позиции для всех гридов выше начальной цены
-   */
   async handleInitialPositionsFill(
     serviceOrder: { id: number; side: 'BUY' | 'SELL'; meta: Record<string, unknown>; type: string },
     fill: WsUserFill,
@@ -31,17 +27,8 @@ class StrategyService {
       return;
     }
 
-    console.log('Handling initial positions fill:', {
-      fillPrice: fill.px,
-      fillSize: fill.sz,
-      fee: fill.fee,
-      meta: serviceOrder.meta,
-    });
-
     const initialPrice = Number(serviceOrder.meta.initialPrice);
     const grid = strategy.settings.grid;
-
-    // Находим первый грид выше начальной цены
     const startGridIndex = this.findGridUpperIndex(initialPrice);
 
     if (startGridIndex === -1 || startGridIndex >= grid.length) {
@@ -49,10 +36,8 @@ class StrategyService {
       return;
     }
 
-    // Общий размер купленной позиции в ETH
     const totalSizeInEth = new BigNumber(fill.sz);
 
-    // Рассчитываем общий размер в USDT для всех позиций (с учетом orderSizeLevels)
     let totalExpectedSizeInUsdt = new BigNumber(0);
     for (let i = startGridIndex; i < grid.length; i++) {
       const gridPrice = grid[i];
@@ -64,8 +49,6 @@ class StrategyService {
 
     console.log(`Total filled: ${fill.sz} ETH, Expected total: ${totalExpectedSizeInUsdt.toString()} USDT`);
 
-    // Создаем позиции для каждого грида выше начальной цены
-    // Размер каждой позиции пропорционален её orderSizeLevel
     const positionsToCreate: Array<{
       strategyId: string;
       size: number;
@@ -128,9 +111,6 @@ class StrategyService {
         balance: memoryStorage.getBalance(),
       })
       .where(eq(schema.strategies.id, strategy.id));
-
-    // Запускаем обычную синхронизацию ордеров
-    // await this.syncOrders();
   }
 
   findGridUpperIndex(price: number): number {
@@ -149,30 +129,6 @@ class StrategyService {
 
     // Если цена выше всех гридов
     return grid.length;
-  }
-
-  /**
-   * Округляет цену до 1 знака после запятой
-   */
-  roundPrice(price: number): number {
-    return new BigNumber(price).decimalPlaces(1, BigNumber.ROUND_DOWN).toNumber();
-  }
-
-  /**
-   * Округляет размер до 4 знаков после запятой
-   */
-  roundSize(size: number): number {
-    return new BigNumber(size).decimalPlaces(4, BigNumber.ROUND_DOWN).toNumber();
-  }
-
-  /**
-   * Вычисляет размер ордера в ETH для заданной цены в USDT
-   */
-  getOrderSizeInEth(ethPrice: number, orderSizeInUsdt: number): number {
-    const usdtAmount = new BigNumber(orderSizeInUsdt);
-    const price = new BigNumber(ethPrice);
-    const orderSize = usdtAmount.dividedBy(price);
-    return orderSize.decimalPlaces(4, BigNumber.ROUND_DOWN).toNumber();
   }
 
   findFirstGridLower(price: number): number | null {
@@ -330,9 +286,6 @@ class StrategyService {
     return sellTargets;
   }
 
-  /**
-   * Сохраняет открытый ордер в БД при выставлении
-   */
   async saveOpenedOrderToDB(
     orderId: number,
     size: number,
@@ -364,10 +317,6 @@ class StrategyService {
     }
   }
 
-  /**
-   * Обрабатывает заполнение BUY ордера
-   * Создает позицию в БД и привязывает к ней ордер
-   */
   async handleBuyOrderFill(fill: WsUserFill): Promise<void> {
     console.log('=== handleBuyOrderFill START ===');
     console.log('Fill data:', { oid: fill.oid, px: fill.px, sz: fill.sz, fee: fill.fee });
@@ -472,10 +421,6 @@ class StrategyService {
     }
   }
 
-  /**
-   * Обрабатывает заполнение SELL ордера
-   * Закрывает позицию в БД
-   */
   async handleSellOrderFill(fill: WsUserFill): Promise<void> {
     const strategy = memoryStorage.getStrategy();
     if (!strategy) {
@@ -545,42 +490,6 @@ class StrategyService {
     } catch (error) {
       console.error('Error handling SELL order fill:', error);
     }
-  }
-
-  /**
-   * Извлекает ID ордера из одного статуса
-   * @param status - элемент из массива statuses
-   * @returns ID ордера или null
-   * @example
-   * const orderResponse = await sdk.placeOrder(...);
-   * for (const status of orderResponse.response.data.statuses) {
-   *   const orderId = strategyService.getOrderIdFromStatus(status);
-   *   if (orderId) {
-   *     console.log('Order ID:', orderId);
-   *   }
-   * }
-   */
-  getOrderIdFromStatus(status: OrderResponse['response']['data']['statuses'][0]): number | null {
-    return status?.filled?.oid || status?.resting?.oid || null;
-  }
-
-  /**
-   * Извлекает все ID ордеров из ответа биржи
-   * @param orderData - данные ответа от биржи
-   * @returns массив ID ордеров
-   */
-  getAllOrderIdsFromResponse(orderData: OrderResponse['response']['data']): number[] {
-    if (!orderData?.statuses) return [];
-
-    const orderIds: number[] = [];
-    for (const status of orderData.statuses) {
-      const orderId = this.getOrderIdFromStatus(status);
-      if (orderId !== null) {
-        orderIds.push(orderId);
-      }
-    }
-
-    return orderIds;
   }
 }
 
