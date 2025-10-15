@@ -171,7 +171,7 @@ class HyperliquidService {
   /**
    * Отменяет все открытые ордера
    */
-  private async cancelAllOrders(): Promise<void> {
+  async cancelAllOrders(): Promise<void> {
     if (!this.sdk) {
       console.error('SDK not initialized');
       return;
@@ -184,16 +184,9 @@ class HyperliquidService {
       return;
     }
 
-    if (openOrders.length !== 1) {
-      console.log('Invalid number of open orders to cancel:', openOrders.length);
-      return;
-    }
-
-    console.log(`Cancelling open order for ETH-PERP`);
-
-    try {
-      const response = await this.sdk.wsPayloads.cancelOrder({ coin: 'ETH-PERP', o: openOrders[0]?.id || 0 });
-      console.log('Cancel orders response:', response);
+    for (const order of openOrders) {
+      const response = await this.sdk.wsPayloads.cancelOrder({ coin: 'ETH-PERP', o: order.id });
+      console.log('Cancel order response:', response);
 
       if (response?.status !== 'ok') {
         console.error('Failed to cancel orders:', response);
@@ -206,15 +199,12 @@ class HyperliquidService {
           status: 'CANCELLED',
           closedAt: new Date().toISOString(),
         })
-        .where(eq(schema.orders.id, openOrders[0]?.id || 0));
+        .where(eq(schema.orders.id, order.id));
 
-      memoryStorage.setOrders([]);
-
-      console.log(`Successfully cancelled open order`);
-    } catch (error) {
-      console.error('Error cancelling orders:', error);
-      // Не обновляем БД и память, если отмена не удалась
+      memoryStorage.removeOrder(order.id);
     }
+
+    console.log(`Successfully cancelled all open orders`);
   }
 
   /**

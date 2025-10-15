@@ -90,8 +90,7 @@ class StrategyRunner {
 
     console.log('Stopping strategy runner...');
 
-    // Можно добавить отмену всех открытых ордеров
-    // await this.cancelAllOrders();
+    await hyperliquidService.cancelAllOrders();
 
     this.isRunning = false;
     console.log('Strategy runner stopped');

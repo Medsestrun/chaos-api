@@ -38,17 +38,10 @@ export const loadStrategy = async (strategyId: string | null = null): Promise<bo
     const strategy = strategies[0] as Strategy;
     console.log(`Loading strategy: ${strategy.id}`);
 
-    // Загружаем уровни размеров ордеров
-    // TODO: Нужно свериться с гипером
     const orderSizeLevels = await db.select().from(schema.orderSizeLevels).where(eq(schema.orderSizeLevels.strategyId, strategy.id));
-
-    // Загружаем позиции
     const positions = await db.select().from(schema.positions).where(eq(schema.positions.strategyId, strategy.id));
-
-    // Загружаем только открытые ордера
     const orders = await db.select().from(schema.orders).where(eq(schema.orders.status, 'OPENED'));
 
-    // Сохраняем в памяти
     memoryStorage.setStrategy(strategy);
     memoryStorage.setOrderSizeLevels(orderSizeLevels as OrderSizeLevel[]);
     memoryStorage.setPositions(positions as Position[]);

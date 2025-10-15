@@ -6,13 +6,8 @@ type StrategySettings = {
   maxPrice: number;
 };
 
-type Strategy = {
-  id: string;
-  enabled: boolean;
+type Strategy = Omit<typeof schema.strategies.$inferSelect, 'settings'> & {
   settings: StrategySettings;
-  margin: number;
-  balance: number;
-  startedAt: string | null;
 };
 
 type OrderSizeLevel = typeof schema.orderSizeLevels.$inferSelect;
