@@ -1,5 +1,6 @@
 import BigNumber from 'bignumber.js';
 import type { OrderResponse } from 'hyperliquid';
+import memoryStorage from '../MemoryStorage';
 
 /**
  * Округляет цену до 1 знака после запятой
@@ -59,4 +60,31 @@ export function getAllOrderIdsFromResponse(orderData: OrderResponse['response'][
   }
 
   return orderIds;
+}
+
+/**
+ * Получает размер ордера для грида по его ЦЕНЕ
+ * @param gridPrice - цена грида
+ * @returns размер ордера в USDT
+ */
+export function getOrderSizeForGrid(gridPrice: number): number {
+  // Находим подходящий диапазон
+  const levelIndex = memoryStorage.getOrderSizeLevels().findIndex((l, index) => {
+    const isLastLevel = index === memoryStorage.getOrderSizeLevels().length - 1;
+    // Для последнего диапазона включаем levelEnd (<=), для остальных нет (<)
+    return isLastLevel ? gridPrice >= l.levelStart && gridPrice <= l.levelEnd : gridPrice >= l.levelStart && gridPrice < l.levelEnd;
+  });
+
+  if (levelIndex === -1) {
+    console.log(
+      `No level found for grid price ${gridPrice}. Available levels:`,
+      memoryStorage.getOrderSizeLevels().map((l, i) => {
+        const isLast = i === memoryStorage.getOrderSizeLevels().length - 1;
+        return isLast ? `[${l.levelStart}-${l.levelEnd}]: ${l.size}` : `[${l.levelStart}-${l.levelEnd}): ${l.size}`;
+      }),
+    );
+    return 0;
+  }
+
+  return memoryStorage.getOrderSizeLevels()[levelIndex]?.size || 0;
 }

@@ -1,0 +1,1 @@
+ALTER TABLE `orders` ADD `type` text DEFAULT 'REGULAR' NOT NULL;

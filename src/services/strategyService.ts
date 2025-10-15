@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import type { WsUserFill } from 'hyperliquid';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
+import { getOrderSizeForGrid } from '../common/utils';
 import memoryStorage from '../MemoryStorage';
 
 class StrategyService {
@@ -17,17 +18,14 @@ class StrategyService {
     return StrategyService.instance;
   }
 
-  async handleInitialPositionsFill(
-    serviceOrder: { id: number; side: 'BUY' | 'SELL'; meta: Record<string, unknown>; type: string },
-    fill: WsUserFill,
-  ): Promise<void> {
+  async handleInitialPositionsFill(serviceOrder: typeof schema.orders.$inferSelect, fill: WsUserFill): Promise<void> {
     const strategy = memoryStorage.getStrategy();
     if (!strategy) {
       console.error('Strategy not found');
       return;
     }
 
-    const initialPrice = Number(serviceOrder.meta.initialPrice);
+    const initialPrice = serviceOrder.averagePrice;
     const grid = strategy.settings.grid;
     const startGridIndex = this.findGridUpperIndex(initialPrice);
 
@@ -42,7 +40,7 @@ class StrategyService {
     for (let i = startGridIndex; i < grid.length; i++) {
       const gridPrice = grid[i];
       if (gridPrice !== undefined) {
-        const orderSizeUsdt = memoryStorage.getOrderSizeForGrid(gridPrice);
+        const orderSizeUsdt = getOrderSizeForGrid(gridPrice);
         totalExpectedSizeInUsdt = totalExpectedSizeInUsdt.plus(orderSizeUsdt);
       }
     }
@@ -62,10 +60,9 @@ class StrategyService {
       const gridPrice = grid[i];
       if (gridPrice !== undefined) {
         // Получаем целевой размер для этого грида в USDT
-        const orderSizeUsdt = memoryStorage.getOrderSizeForGrid(gridPrice);
+        const orderSizeUsdt = getOrderSizeForGrid(gridPrice);
 
         // Рассчитываем размер позиции пропорционально целевому размеру
-        // sizeInEth = (orderSizeUsdt / totalExpectedSizeInUsdt) * totalSizeInEth
         const sizeInEth = totalExpectedSizeInUsdt.isZero()
           ? totalSizeInEth.dividedBy(grid.length - startGridIndex)
           : new BigNumber(orderSizeUsdt).dividedBy(totalExpectedSizeInUsdt).multipliedBy(totalSizeInEth);
@@ -99,9 +96,7 @@ class StrategyService {
       memoryStorage.addPosition(position as typeof schema.positions.$inferSelect);
     }
 
-    memoryStorage.removeServiceOrder(fill.oid);
-
-    console.log(`Created ${createdPositions.length} positions, starting normal order sync`);
+    memoryStorage.removeOrder(fill.oid);
 
     memoryStorage.updateBalance(-Number(fill.fee));
 
@@ -111,6 +106,17 @@ class StrategyService {
         balance: memoryStorage.getBalance(),
       })
       .where(eq(schema.strategies.id, strategy.id));
+
+    await db
+      .update(schema.orders)
+      .set({
+        status: 'FILLED',
+        fee: Number(fill.fee),
+        closedAt: new Date().toISOString(),
+      })
+      .where(eq(schema.orders.id, fill.oid));
+
+    console.log(`Created ${createdPositions.length} positions, starting normal order sync`);
   }
 
   findGridUpperIndex(price: number): number {
@@ -149,15 +155,16 @@ class StrategyService {
   }
 
   /**
-   * Находит грида для покупки (без открытых позиций и без открытых BUY ордеров, ниже текущей цены)
+   * Находит один грид для покупки (без открытой позиции и без открытого BUY ордера)
    * @param currentPrice - текущая цена
-   * @param limit - максимальное количество целей для покупки
-   * @param ensureMinimum - гарантировать минимум 1 цель, даже если далеко от текущей цены
-   * @returns массив целей с индексом грида, ценой и размером
+   * @returns объект с индексом грида, ценой и размером
+   * @throws Error если не найден подходящий грид для покупки или выход за пределы грида
    */
-  findBuyTargets(currentPrice: number, limit = 1, ensureMinimum = false): Array<{ gridIndex: number; price: number; size: number }> {
+  findBuyTargets(currentPrice: number): { gridIndex: number; price: number; size: number } | null {
     const strategy = memoryStorage.getStrategy();
-    if (!strategy) return [];
+    if (!strategy) {
+      return null;
+    }
 
     const grid = strategy.settings.grid;
     const currentGridIndex = this.findGridUpperIndex(currentPrice);
@@ -182,54 +189,52 @@ class StrategyService {
     }
 
     // Сначала ищем грида ниже текущей цены (приоритетные)
-    const buyTargets: Array<{ gridIndex: number; price: number; size: number }> = [];
-    for (let i = currentGridIndex - 1; i >= 0 && buyTargets.length < limit; i--) {
+    for (let i = currentGridIndex - 1; i >= 0; i--) {
       const gridPrice = grid[i];
       const hasPosition = positionsByGrid.has(i);
       const hasOpenOrder = gridPrice !== undefined && buyOrderPrices.has(gridPrice);
 
       if (!hasPosition && !hasOpenOrder && gridPrice !== undefined) {
-        const orderSize = memoryStorage.getOrderSizeForGrid(gridPrice);
+        const orderSize = getOrderSizeForGrid(gridPrice);
         if (orderSize > 0) {
-          buyTargets.push({ gridIndex: i, price: gridPrice, size: orderSize });
+          return { gridIndex: i, price: gridPrice, size: orderSize };
         }
       }
     }
 
-    // Если не нашли достаточно целей и нужно гарантировать минимум - ищем любой свободный грид
-    if (ensureMinimum && buyTargets.length === 0) {
-      for (let i = 0; i < grid.length; i++) {
-        const gridPrice = grid[i];
-        const hasPosition = positionsByGrid.has(i);
-        const hasOpenOrder = gridPrice !== undefined && buyOrderPrices.has(gridPrice);
+    // Проверяем, что не вышли за нижний предел грида
+    if (currentGridIndex <= 0) {
+      return null;
+    }
 
-        if (!hasPosition && !hasOpenOrder && gridPrice !== undefined) {
-          const orderSize = memoryStorage.getOrderSizeForGrid(gridPrice);
-          if (orderSize > 0) {
-            buyTargets.push({ gridIndex: i, price: gridPrice, size: orderSize });
-            break; // Нужен хотя бы один
-          }
+    // Если не нашли ниже текущей цены, ищем любой свободный грид
+    for (let i = 0; i < grid.length; i++) {
+      const gridPrice = grid[i];
+      const hasPosition = positionsByGrid.has(i);
+      const hasOpenOrder = gridPrice !== undefined && buyOrderPrices.has(gridPrice);
+
+      if (!hasPosition && !hasOpenOrder && gridPrice !== undefined) {
+        const orderSize = getOrderSizeForGrid(gridPrice);
+        if (orderSize > 0) {
+          return { gridIndex: i, price: gridPrice, size: orderSize };
         }
       }
     }
 
-    return buyTargets;
+    return null;
   }
 
   /**
-   * Находит открытые позиции для продажи (без открытых SELL ордеров на эти позиции)
+   * Находит одну открытую позицию для продажи (без открытого SELL ордера на эту позицию)
    * @param currentPrice - текущая цена
-   * @param limit - максимальное количество целей для продажи
-   * @param ensureMinimum - гарантировать минимум 1 цель, даже если далеко от текущей цены
-   * @returns массив целей с позицией и ценой закрытия
+   * @returns объект с позицией и ценой закрытия
+   * @throws Error если не найдена подходящая позиция или выход за пределы грида
    */
-  findSellTargets(
-    currentPrice: number,
-    limit = 1,
-    ensureMinimum = false,
-  ): Array<{ position: typeof schema.positions.$inferSelect; closePrice: number }> {
+  findSellTargets(currentPrice: number): { position: typeof schema.positions.$inferSelect; closePrice: number } | null {
     const strategy = memoryStorage.getStrategy();
-    if (!strategy) return [];
+    if (!strategy) {
+      return null;
+    }
 
     const grid = strategy.settings.grid;
     const currentGridIndex = this.findGridUpperIndex(currentPrice);
@@ -253,37 +258,40 @@ class StrategyService {
       }
     }
 
-    // Находим ближайших открытых позиции для продажи без открытых SELL ордеров
-    const sellTargets: Array<{ position: (typeof openPositions)[0]; closePrice: number }> = [];
-
     // Сначала ищем позиции ниже текущей цены (приоритетные)
-    for (let i = currentGridIndex - 1; i >= 0 && sellTargets.length < limit; i--) {
+    for (let i = currentGridIndex - 1; i >= 0; i--) {
       const position = positionsByGrid.get(i);
       if (position && !positionsWithSellOrders.has(position.id)) {
         const closeGridIndex = i + 1;
-        if (closeGridIndex < grid.length) {
-          const closePrice = grid[closeGridIndex];
-          if (closePrice !== undefined) {
-            sellTargets.push({ position, closePrice });
-          }
+
+        // Проверяем, что мы не вышли за пределы грида
+        if (closeGridIndex >= grid.length) {
+          return null;
         }
+
+        const closePrice = grid[closeGridIndex];
+        if (closePrice === undefined) {
+          return null;
+        }
+
+        return { position, closePrice };
       }
     }
 
-    // Если не нашли достаточно целей и нужно гарантировать минимум - ищем любые позиции
-    if (ensureMinimum && sellTargets.length === 0) {
-      for (const position of openPositions) {
-        if (!positionsWithSellOrders.has(position.id) && position.gridClosePrice) {
-          sellTargets.push({
-            position,
-            closePrice: position.gridClosePrice,
-          });
-          break; // Нужна хотя бы одна
+    // Если не нашли ниже текущей цены, ищем любую доступную позицию
+    for (const position of openPositions) {
+      if (!positionsWithSellOrders.has(position.id)) {
+        if (!position.gridClosePrice) {
+          return null;
         }
+        return {
+          position,
+          closePrice: position.gridClosePrice,
+        };
       }
     }
 
-    return sellTargets;
+    return null;
   }
 
   async saveOpenedOrderToDB(
@@ -291,6 +299,7 @@ class StrategyService {
     size: number,
     side: 'BUY' | 'SELL',
     price: number,
+    orderType: 'REGULAR' | 'INITIAL_POSITIONS_BUY_UP' | 'FILL_EMPTY_POSITIONS' | 'ORDER_SIZE_INCREASE' = 'REGULAR',
     positionId: number | null = null,
   ): Promise<void> {
     try {
@@ -302,6 +311,7 @@ class StrategyService {
           side: side,
           positionId: positionId,
           status: 'OPENED',
+          type: orderType,
           averagePrice: price,
           fee: 0,
           closedPnl: 0,
@@ -318,9 +328,6 @@ class StrategyService {
   }
 
   async handleBuyOrderFill(fill: WsUserFill): Promise<void> {
-    console.log('=== handleBuyOrderFill START ===');
-    console.log('Fill data:', { oid: fill.oid, px: fill.px, sz: fill.sz, fee: fill.fee });
-
     const strategy = memoryStorage.getStrategy();
     if (!strategy) {
       console.error('Strategy not found');
@@ -330,26 +337,14 @@ class StrategyService {
     try {
       // Находим ордер в памяти, чтобы получить целевую цену грида
       const openOrders = memoryStorage.getOrders();
-      console.log(
-        `Open orders in memory: ${openOrders.length}`,
-        openOrders.map((o) => ({ id: o.id, side: o.side, price: o.averagePrice })),
-      );
-
       const order = openOrders.find((o) => o.id === fill.oid);
 
       if (!order) {
         console.error('Order not found in memory:', fill.oid);
-        console.log(
-          'Available order IDs:',
-          openOrders.map((o) => o.id),
-        );
         return;
       }
 
-      console.log('Found order in memory:', { id: order.id, side: order.side, targetPrice: order.averagePrice });
-
       const grid = strategy.settings.grid;
-      console.log('Grid:', grid);
 
       // Используем целевую цену грида из ордера (averagePrice), а не фактическую цену исполнения
       // Это важно, т.к. LIMIT ордер может исполниться по лучшей цене
@@ -361,12 +356,8 @@ class StrategyService {
         return;
       }
 
-      console.log(`Found grid price: ${gridPrice} for target price: ${order.averagePrice}`);
-
       const gridIndex = grid.indexOf(gridPrice);
       const closeGridPrice = gridIndex !== -1 && gridIndex + 1 < grid.length ? grid[gridIndex + 1] : null;
-
-      console.log(`BUY fill: target grid ${gridPrice}, actual fill price ${fill.px}`);
 
       // Создаем позицию
       const createdPosition = await db
@@ -471,7 +462,6 @@ class StrategyService {
         })
         .where(eq(schema.orders.id, fill.oid));
 
-      // Обновляем баланс (добавляем PnL, вычитаем комиссию)
       memoryStorage.updateBalance(closedPnl);
       memoryStorage.updateBalance(-Number(fill.fee));
 

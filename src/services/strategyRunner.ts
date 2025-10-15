@@ -47,7 +47,7 @@ class StrategyRunner {
     } else {
       // Есть позиции: работаем в обычном режиме с гарантией минимум 1 BUY и 1 SELL
       console.log('Positions exist: syncing orders with minimum guarantee');
-      await hyperliquidService.syncOrders(true);
+      await hyperliquidService.syncOrders();
     }
 
     this.isRunning = true;

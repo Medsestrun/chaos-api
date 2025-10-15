@@ -21,13 +21,6 @@ type Position = typeof schema.positions.$inferSelect;
 
 type Order = typeof schema.orders.$inferSelect;
 
-type ServiceOrder = {
-  id: number;
-  side: 'BUY' | 'SELL';
-  meta: Record<string, unknown>;
-  type: 'INITIAL_POSITIONS_BUY_UP' | 'FILL_EMPTY_POSITIONS' | 'ORDER_SIZE_INCREASE';
-};
-
 class MemoryStorage {
   private static instance: MemoryStorage;
 
@@ -35,7 +28,6 @@ class MemoryStorage {
   private orderSizeLevels: OrderSizeLevel[] = [];
   private positions: Map<number, Position> = new Map();
   private orders: Map<number, Order> = new Map();
-  private openServiceOrders: Map<number, ServiceOrder> = new Map();
 
   private constructor() {}
 
@@ -70,33 +62,6 @@ class MemoryStorage {
   getBalance(): number {
     if (!this.strategy) return 0;
     return this.strategy.balance;
-  }
-
-  /**
-   * Получает размер ордера для грида по его ЦЕНЕ
-   * @param gridPrice - цена грида
-   * @returns размер ордера в USDT
-   */
-  getOrderSizeForGrid(gridPrice: number): number {
-    // Находим подходящий диапазон
-    const levelIndex = this.orderSizeLevels.findIndex((l, index) => {
-      const isLastLevel = index === this.orderSizeLevels.length - 1;
-      // Для последнего диапазона включаем levelEnd (<=), для остальных нет (<)
-      return isLastLevel ? gridPrice >= l.levelStart && gridPrice <= l.levelEnd : gridPrice >= l.levelStart && gridPrice < l.levelEnd;
-    });
-
-    if (levelIndex === -1) {
-      console.log(
-        `No level found for grid price ${gridPrice}. Available levels:`,
-        this.orderSizeLevels.map((l, i) => {
-          const isLast = i === this.orderSizeLevels.length - 1;
-          return isLast ? `[${l.levelStart}-${l.levelEnd}]: ${l.size}` : `[${l.levelStart}-${l.levelEnd}): ${l.size}`;
-        }),
-      );
-      return 0;
-    }
-
-    return this.orderSizeLevels[levelIndex]?.size || 0;
   }
 
   setPositions(positions: Position[]): void {
@@ -136,29 +101,6 @@ class MemoryStorage {
     }
   }
 
-  setOpenServiceOrders(orders: ServiceOrder[]): void {
-    this.openServiceOrders.clear();
-    for (const order of orders) {
-      this.openServiceOrders.set(order.id, order);
-    }
-  }
-
-  getOpenServiceOrders(): ServiceOrder[] {
-    return Array.from(this.openServiceOrders.values());
-  }
-
-  addServiceOrder(order: ServiceOrder): void {
-    this.openServiceOrders.set(order.id, order);
-  }
-
-  findServiceOrder(id: number): ServiceOrder | undefined {
-    return this.openServiceOrders.get(id);
-  }
-
-  removeServiceOrder(id: number): void {
-    this.openServiceOrders.delete(id);
-  }
-
   getOrders(): Order[] {
     return Array.from(this.orders.values());
   }
@@ -182,12 +124,15 @@ class MemoryStorage {
     }
   }
 
+  findOrder(id: number): Order | undefined {
+    return this.orders.get(id);
+  }
+
   clear(): void {
     this.strategy = null;
     this.orderSizeLevels = [];
     this.positions.clear();
     this.orders.clear();
-    this.openServiceOrders.clear();
   }
 }
 

@@ -1,8 +1,8 @@
-import { inArray } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { Hyperliquid, type OrderResponse, type WsOrder, type WsUserFills, type WsUserFundings } from 'hyperliquid';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
-import { getOrderIdFromStatus, getOrderSizeInEth, roundPrice, roundSize } from '../common/utils';
+import { getOrderIdFromStatus, getOrderSizeForGrid, getOrderSizeInEth, roundPrice, roundSize } from '../common/utils';
 import memoryStorage from '../MemoryStorage';
 import strategyService from './strategyService';
 
@@ -35,7 +35,6 @@ class HyperliquidService {
       });
 
       await this.sdk.connect();
-      console.log('Connected to Hyperliquid WebSocket');
 
       this.walletAddress = process.env.WALLET_ADDRESS || '';
 
@@ -46,8 +45,8 @@ class HyperliquidService {
         }
       });
 
-      // Подписываемся на заполнение ордеров
       if (this.walletAddress) {
+        // Подписываемся на заполнение ордеров
         this.sdk.subscriptions.subscribeToUserFills(this.walletAddress, (fills) => {
           if (!fills.isSnapshot) {
             this.handleFills(fills);
@@ -93,13 +92,10 @@ class HyperliquidService {
     ]);
   }
 
-  /**
-   * Обрабатывает заполненные ордера
-   */
   private async handleFills(data: WsUserFills): Promise<void> {
     console.log('Received fills:', data.fills);
 
-    if (data.fills.length > 1 && !data.isSnapshot) {
+    if (data.fills.length > 1) {
       console.log('Received multiple fills:', data.fills);
     }
 
@@ -111,54 +107,24 @@ class HyperliquidService {
       fillsByOrder.set(fill.oid, existing);
     }
 
-    // Флаг для отслеживания обработки сервисного ордера начальной закупки
-    let processedInitialOrder = false;
-
     // Обрабатываем каждый уникальный ордер
     for (const [oid, fills] of fillsByOrder.entries()) {
       // Берем первый fill для получения основной информации
       const firstFill = fills[0];
       if (!firstFill) continue;
 
-      // Проверяем, является ли это сервисным ордером
-      const serviceOrder = memoryStorage.findServiceOrder(oid);
+      const order = memoryStorage.findOrder(oid);
 
-      if (serviceOrder) {
-        console.log('Processing service order fill:', serviceOrder.type);
-
-        if (serviceOrder.type === 'INITIAL_POSITIONS_BUY_UP') {
-          // Для сервисного ордера суммируем все fills
-          const totalSize = fills.reduce((sum, f) => sum + Number(f.sz), 0);
-          const totalFee = fills.reduce((sum, f) => sum + Number(f.fee), 0);
-          const avgPrice = fills.reduce((sum, f) => sum + Number(f.px) * Number(f.sz), 0) / totalSize;
-
-          const aggregatedFill = {
-            ...firstFill,
-            sz: totalSize.toString(),
-            fee: totalFee.toString(),
-            px: avgPrice.toString(),
-          };
-
-          await strategyService.handleInitialPositionsFill(serviceOrder, aggregatedFill);
-          processedInitialOrder = true;
-        }
-
-        continue;
-      }
-
-      // Проверяем, не обработали ли мы уже этот ордер
-      const existingOrder = memoryStorage.getOrders().find((o) => o.id === oid);
-      if (!existingOrder) {
+      if (!order) {
         console.log(`Order ${oid} not found in memory, skipping fill processing`);
         continue;
       }
 
-      if (existingOrder.status === 'FILLED') {
+      if (order.status === 'FILLED') {
         console.log(`Order ${oid} already filled, skipping`);
         continue;
       }
 
-      // Суммируем все fills для этого ордера
       const totalSize = fills.reduce((sum, f) => sum + Number(f.sz), 0);
       const totalFee = fills.reduce((sum, f) => sum + Number(f.fee), 0);
       const avgPrice = fills.reduce((sum, f) => sum + Number(f.px) * Number(f.sz), 0) / totalSize;
@@ -170,19 +136,22 @@ class HyperliquidService {
         px: avgPrice.toString(),
       };
 
-      // Обрабатываем обычные ордера
-      if (firstFill.side === 'B') {
-        // BUY ордер - создаем позицию
+      if (order.type === 'INITIAL_POSITIONS_BUY_UP') {
+        console.log('Processing INITIAL_POSITIONS_BUY_UP fill:', order.type);
+
+        await strategyService.handleInitialPositionsFill(order, aggregatedFill);
+
+        continue;
+      }
+
+      if (firstFill.side === 'buy') {
         await strategyService.handleBuyOrderFill(aggregatedFill);
-      } else if (firstFill.side === 'A') {
-        // SELL ордер - закрываем позицию
+      } else {
         await strategyService.handleSellOrderFill(aggregatedFill);
       }
     }
 
-    // После обработки всех заполнений - синхронизируем ордера
-    // Если была обработана начальная закупка, гарантируем минимум 1 BUY и 1 SELL ордер
-    await this.syncOrders(processedInitialOrder);
+    await this.syncOrders();
   }
 
   /**
@@ -209,41 +178,39 @@ class HyperliquidService {
     }
 
     const openOrders = memoryStorage.getOpenOrders();
+
     if (openOrders.length === 0) {
       console.log('No open orders to cancel');
       return;
     }
 
-    console.log(`Cancelling ${openOrders.length} open orders for ETH-PERP`);
+    if (openOrders.length !== 1) {
+      console.log('Invalid number of open orders to cancel:', openOrders.length);
+      return;
+    }
+
+    console.log(`Cancelling open order for ETH-PERP`);
 
     try {
-      const response = await this.sdk.wsPayloads.cancelAllOrders();
+      const response = await this.sdk.wsPayloads.cancelOrder({ coin: 'ETH-PERP', o: openOrders[0]?.id || 0 });
       console.log('Cancel orders response:', response);
 
-      // Проверяем статус ответа
       if (response?.status !== 'ok') {
         console.error('Failed to cancel orders:', response);
         return;
       }
 
-      // Обновляем статус в БД
       await db
         .update(schema.orders)
         .set({
           status: 'CANCELLED',
           closedAt: new Date().toISOString(),
         })
-        .where(
-          inArray(
-            schema.orders.id,
-            openOrders.map((order) => order.id),
-          ),
-        );
+        .where(eq(schema.orders.id, openOrders[0]?.id || 0));
 
-      // Очищаем открытые ордера в памяти
       memoryStorage.setOrders([]);
 
-      console.log(`Successfully cancelled ${openOrders.length} orders`);
+      console.log(`Successfully cancelled open order`);
     } catch (error) {
       console.error('Error cancelling orders:', error);
       // Не обновляем БД и память, если отмена не удалась
@@ -254,45 +221,34 @@ class HyperliquidService {
    * Проверяет открытые позиции и выставляет необходимые ордера
    * @param ensureMinimum - гарантировать минимум 1 BUY и 1 SELL ордер (для первого запуска)
    */
-  async syncOrders(ensureMinimum = false): Promise<void> {
+  async syncOrders(): Promise<void> {
     const strategy = memoryStorage.getStrategy();
+
     if (!strategy || !this.isConnected || !this.sdk) {
       console.log('Strategy not loaded or not connected');
       return;
     }
 
     const currentPrice = this.getCurrentPrice();
+
     if (currentPrice === 0) {
       console.log('Current price not available yet');
       return;
     }
 
-    // Отменяем все текущие ордера
     await this.cancelAllOrders();
 
-    const openPositions = memoryStorage.getOpenPositions();
-    console.log(`Open positions: ${openPositions.length}${ensureMinimum ? ' (ensuring minimum orders)' : ''}`);
+    const buyTarget = strategyService.findBuyTargets(currentPrice);
+    const sellTarget = strategyService.findSellTargets(currentPrice);
 
-    // Находим грида для покупки
-    // При первом запуске гарантируем минимум 1 BUY ордер, даже если грид далеко
-    const buyTargets = strategyService.findBuyTargets(currentPrice, 1, ensureMinimum);
+    console.log(`Placing orders: ${buyTarget ? 1 : 0} BUY + ${sellTarget ? 1 : 0} SELL, at ${currentPrice} price`);
 
-    // Находим открытые позиции для продажи
-    // При первом запуске гарантируем минимум 1 SELL ордер, даже если позиция далеко
-    const sellTargets = strategyService.findSellTargets(currentPrice, 1, ensureMinimum);
-
-    // Логируем, что будем выставлять
-    console.log(`Placing orders: ${buyTargets.length} BUY + ${sellTargets.length} SELL`);
-
-    // Выставляем ордера ПОСЛЕДОВАТЕЛЬНО, чтобы избежать duplicate nonce
-    // BUY ордера
-    for (const target of buyTargets) {
-      await this.placeBuyOrder(target.price, target.size);
+    if (buyTarget) {
+      await this.placeBuyOrder(buyTarget.price, buyTarget.size);
     }
 
-    // SELL ордера
-    for (const target of sellTargets) {
-      await this.placeSellOrder(target.closePrice, target.position.size, target.position.id);
+    if (sellTarget) {
+      await this.placeSellOrder(sellTarget.closePrice, sellTarget.position.size, sellTarget.position.id);
     }
   }
 
@@ -303,12 +259,14 @@ class HyperliquidService {
    */
   async openInitialPositions(): Promise<void> {
     const strategy = memoryStorage.getStrategy();
+
     if (!strategy || !this.isConnected || !this.sdk) {
       console.log('Strategy not loaded or not connected');
       return;
     }
 
     const currentPrice = this.getCurrentPrice();
+
     if (currentPrice === 0) {
       console.log('Current price not available yet');
       return;
@@ -317,8 +275,6 @@ class HyperliquidService {
     const grid = strategy.settings.grid;
     const currentGridIndex = strategyService.findGridUpperIndex(currentPrice); // Первый грид ВЫШЕ текущей цены
     const openPositions = memoryStorage.getOpenPositions();
-
-    console.log(`Current price: ${currentPrice}, Next grid up index: ${currentGridIndex}, Open positions: ${openPositions.length}`);
 
     // Если уже есть открытые позиции, не делаем ничего
     if (openPositions.length > 0) {
@@ -337,7 +293,7 @@ class HyperliquidService {
     for (let i = currentGridIndex; i < grid.length; i++) {
       const gridPrice = grid[i];
       if (gridPrice !== undefined) {
-        const orderSize = memoryStorage.getOrderSizeForGrid(gridPrice);
+        const orderSize = getOrderSizeForGrid(gridPrice);
         totalSizeInUsdt += orderSize;
       }
     }
@@ -350,34 +306,27 @@ class HyperliquidService {
     console.log(`Placing BUY order for ${totalSizeInUsdt} USDT to open positions for ${grid.length - currentGridIndex} grids above`);
 
     try {
-      const orderResponse = await this.placeBuyOrder(Math.floor(currentPrice) + 100, totalSizeInUsdt, true);
+      const orderResponse = await this.placeBuyOrder(Math.floor(currentPrice), totalSizeInUsdt, 'INITIAL_POSITIONS_BUY_UP');
 
       if (orderResponse?.status !== 'ok' || !orderResponse?.response?.data?.statuses[0]) {
         throw new Error(`Failed to place buy service order: ${orderResponse?.status}`);
       }
-
-      const orderId = getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
-      memoryStorage.addServiceOrder({
-        id: orderId || 0,
-        type: 'INITIAL_POSITIONS_BUY_UP',
-        side: 'BUY',
-        meta: {
-          initialPrice: currentPrice,
-          numberOfPositions: grid.length - currentGridIndex,
-        },
-      });
     } catch (error) {
       console.error('Error placing initial positions buy order:', error);
       this.openInitialPositions();
     }
   }
 
-  private async placeBuyOrder(price: number, sizeInUsdt: number, isServiceOrder = false): Promise<OrderResponse | null> {
+  private async placeBuyOrder(
+    price: number,
+    sizeInUsdt: number,
+    orderType: 'REGULAR' | 'INITIAL_POSITIONS_BUY_UP' | 'FILL_EMPTY_POSITIONS' | 'ORDER_SIZE_INCREASE' = 'REGULAR',
+  ): Promise<OrderResponse | null> {
     if (!this.sdk) return null;
 
     try {
       const size = getOrderSizeInEth(price, sizeInUsdt);
-      const roundedPrice = roundPrice(price);
+      const roundedPrice = orderType === 'INITIAL_POSITIONS_BUY_UP' ? roundPrice(price + 100) : roundPrice(price);
 
       console.log(`Placing LIMIT BUY order: price=${roundedPrice}, size=${size} ETH`);
 
@@ -392,10 +341,12 @@ class HyperliquidService {
 
       console.log('Buy order response:', JSON.stringify(orderResponse));
 
-      if (!isServiceOrder && orderResponse?.status === 'ok') {
+      if (orderResponse?.status === 'ok') {
         const orderId = getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
+
         if (orderId) {
-          await strategyService.saveOpenedOrderToDB(orderId, size, 'BUY', roundedPrice);
+          // В базе все равно записываем фактическую цену ордера, а не повышеную (ее повышаем чтобы точно исполнился market order)
+          await strategyService.saveOpenedOrderToDB(orderId, size, 'BUY', roundPrice(price), orderType);
         }
       }
 
@@ -429,7 +380,7 @@ class HyperliquidService {
       if (orderResponse?.status === 'ok') {
         const orderId = getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
         if (orderId) {
-          await strategyService.saveOpenedOrderToDB(orderId, roundedSize, 'SELL', roundedPrice, positionId);
+          await strategyService.saveOpenedOrderToDB(orderId, roundedSize, 'SELL', roundedPrice, 'REGULAR', positionId);
         }
       }
 

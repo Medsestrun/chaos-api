@@ -22,6 +22,9 @@ export const orders = sqliteTable('orders', {
   status: text('status', {
     enum: ['OPENED', 'CANCELLED', 'FILLED', 'PARTIALLY_FILLED'],
   }).notNull(),
+  type: text('type', { enum: ['REGULAR', 'INITIAL_POSITIONS_BUY_UP', 'FILL_EMPTY_POSITIONS', 'ORDER_SIZE_INCREASE'] })
+    .notNull()
+    .default('REGULAR'),
   averagePrice: real('averagePrice').notNull(),
   fee: real('fee').notNull().default(0),
   closedPnl: real('closedPnl').notNull().default(0),

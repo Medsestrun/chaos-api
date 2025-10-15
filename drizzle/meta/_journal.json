@@ -15,6 +15,13 @@
       "when": 1760303743179,
       "tag": "0001_slimy_random",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1760477573775,
+      "tag": "0002_long_lethal_legion",
+      "breakpoints": true
     }
   ]
 }
