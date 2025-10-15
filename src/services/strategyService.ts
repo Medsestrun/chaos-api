@@ -47,14 +47,7 @@ class StrategyService {
 
     console.log(`Total filled: ${fill.sz} ETH, Expected total: ${totalExpectedSizeInUsdt.toString()} USDT`);
 
-    const positionsToCreate: Array<{
-      strategyId: string;
-      size: number;
-      status: 'OPENED';
-      gridOpenPrice: number;
-      avgOpenPrice: number;
-      gridClosePrice: number | null;
-    }> = [];
+    const positionsToCreate: Array<typeof schema.positions.$inferInsert> = [];
 
     for (let i = startGridIndex; i < grid.length; i++) {
       const gridPrice = grid[i];
@@ -70,7 +63,8 @@ class StrategyService {
         const roundedSize = sizeInEth.decimalPlaces(4, BigNumber.ROUND_DOWN).toNumber();
 
         // Цена закрытия - следующий грид
-        const closeGridPrice = i + 1 < grid.length ? grid[i + 1] : null;
+        const closeGridPrice =
+          i + 1 < grid.length ? grid[i + 1] : (grid[grid.length - 1] || 0) + ((grid[grid.length - 1] || 0) - (grid[grid.length - 2] || 0));
 
         console.log(`Position for grid ${gridPrice}: ${roundedSize} ETH (target: ${orderSizeUsdt} USDT)`);
 
@@ -80,7 +74,7 @@ class StrategyService {
           status: 'OPENED',
           gridOpenPrice: gridPrice,
           avgOpenPrice: Number(fill.px),
-          gridClosePrice: closeGridPrice !== undefined ? closeGridPrice : null,
+          gridClosePrice: closeGridPrice || (grid[grid.length - 1] || 0) + 500,
         });
       }
     }
@@ -100,21 +94,22 @@ class StrategyService {
 
     memoryStorage.updateBalance(-Number(fill.fee));
 
-    await db
-      .update(schema.strategies)
-      .set({
-        balance: memoryStorage.getBalance(),
-      })
-      .where(eq(schema.strategies.id, strategy.id));
-
-    await db
-      .update(schema.orders)
-      .set({
-        status: 'FILLED',
-        fee: Number(fill.fee),
-        closedAt: new Date().toISOString(),
-      })
-      .where(eq(schema.orders.id, fill.oid));
+    await Promise.all([
+      db
+        .update(schema.strategies)
+        .set({
+          balance: memoryStorage.getBalance(),
+        })
+        .where(eq(schema.strategies.id, strategy.id)),
+      db
+        .update(schema.orders)
+        .set({
+          status: 'FILLED',
+          fee: Number(fill.fee),
+          closedAt: new Date().toISOString(),
+        })
+        .where(eq(schema.orders.id, fill.oid)),
+    ]);
 
     console.log(`Created ${createdPositions.length} positions, starting normal order sync`);
   }
@@ -208,18 +203,18 @@ class StrategyService {
     }
 
     // Если не нашли ниже текущей цены, ищем любой свободный грид
-    for (let i = 0; i < grid.length; i++) {
-      const gridPrice = grid[i];
-      const hasPosition = positionsByGrid.has(i);
-      const hasOpenOrder = gridPrice !== undefined && buyOrderPrices.has(gridPrice);
+    // for (let i = 0; i < grid.length; i++) {
+    //   const gridPrice = grid[i];
+    //   const hasPosition = positionsByGrid.has(i);
+    //   const hasOpenOrder = gridPrice !== undefined && buyOrderPrices.has(gridPrice);
 
-      if (!hasPosition && !hasOpenOrder && gridPrice !== undefined) {
-        const orderSize = getOrderSizeForGrid(gridPrice);
-        if (orderSize > 0) {
-          return { gridIndex: i, price: gridPrice, size: orderSize };
-        }
-      }
-    }
+    //   if (!hasPosition && !hasOpenOrder && gridPrice !== undefined) {
+    //     const orderSize = getOrderSizeForGrid(gridPrice);
+    //     if (orderSize > 0) {
+    //       return { gridIndex: i, price: gridPrice, size: orderSize };
+    //     }
+    //   }
+    // }
 
     return null;
   }
@@ -230,64 +225,14 @@ class StrategyService {
    * @returns объект с позицией и ценой закрытия
    * @throws Error если не найдена подходящая позиция или выход за пределы грида
    */
-  findSellTargets(currentPrice: number): { position: typeof schema.positions.$inferSelect; closePrice: number } | null {
-    const strategy = memoryStorage.getStrategy();
-    if (!strategy) {
-      return null;
-    }
-
-    const grid = strategy.settings.grid;
-    const currentGridIndex = this.findGridUpperIndex(currentPrice);
-    const openPositions = memoryStorage.getOpenPositions();
+  findSellTargets(): { position: typeof schema.positions.$inferSelect; closePrice: number } | null {
+    const openPositions = memoryStorage.getOpenPositionsSortedByClosePrice();
     const openOrders = memoryStorage.getOpenOrders();
 
-    // Создаем Map открытых позиций по индексу грида
-    const positionsByGrid = new Map<number, (typeof openPositions)[0]>();
     for (const position of openPositions) {
-      const gridIndex = grid.indexOf(position.gridOpenPrice);
-      if (gridIndex !== -1) {
-        positionsByGrid.set(gridIndex, position);
-      }
-    }
-
-    // Создаем Set ID позиций, на которые уже открыты SELL ордера
-    const positionsWithSellOrders = new Set<number>();
-    for (const order of openOrders) {
-      if (order.side === 'SELL' && order.positionId !== null) {
-        positionsWithSellOrders.add(order.positionId);
-      }
-    }
-
-    // Сначала ищем позиции ниже текущей цены (приоритетные)
-    for (let i = currentGridIndex - 1; i >= 0; i--) {
-      const position = positionsByGrid.get(i);
-      if (position && !positionsWithSellOrders.has(position.id)) {
-        const closeGridIndex = i + 1;
-
-        // Проверяем, что мы не вышли за пределы грида
-        if (closeGridIndex >= grid.length) {
-          return null;
-        }
-
-        const closePrice = grid[closeGridIndex];
-        if (closePrice === undefined) {
-          return null;
-        }
-
-        return { position, closePrice };
-      }
-    }
-
-    // Если не нашли ниже текущей цены, ищем любую доступную позицию
-    for (const position of openPositions) {
-      if (!positionsWithSellOrders.has(position.id)) {
-        if (!position.gridClosePrice) {
-          return null;
-        }
-        return {
-          position,
-          closePrice: position.gridClosePrice,
-        };
+      if (!openOrders.some((order) => order.positionId === position.id && order.side === 'SELL')) {
+        console.log(`Found sell target: ${position} at ${position.gridClosePrice}`);
+        return { position, closePrice: position.gridClosePrice };
       }
     }
 
@@ -335,9 +280,7 @@ class StrategyService {
     }
 
     try {
-      // Находим ордер в памяти, чтобы получить целевую цену грида
-      const openOrders = memoryStorage.getOrders();
-      const order = openOrders.find((o) => o.id === fill.oid);
+      const order = memoryStorage.findOrder(fill.oid);
 
       if (!order) {
         console.error('Order not found in memory:', fill.oid);
@@ -368,7 +311,7 @@ class StrategyService {
           status: 'OPENED',
           gridOpenPrice: gridPrice, // целевой грид
           avgOpenPrice: Number(fill.px), // фактическая цена исполнения
-          gridClosePrice: closeGridPrice !== undefined ? closeGridPrice : null,
+          gridClosePrice: closeGridPrice || (grid[grid.length - 1] || 0) + 500,
         })
         .returning();
 
@@ -380,30 +323,30 @@ class StrategyService {
       const position = createdPosition[0] as typeof schema.positions.$inferSelect;
       memoryStorage.addPosition(position);
 
-      // Обновляем ордер - привязываем к позиции и обновляем статус
-      // Перезаписываем averagePrice фактической ценой исполнения (для отчетности)
-      await db
-        .update(schema.orders)
-        .set({
-          status: 'FILLED',
-          positionId: position.id,
-          averagePrice: Number(fill.px), // фактическая цена исполнения
-          fee: Number(fill.fee),
-          closedAt: new Date().toISOString(),
-        })
-        .where(eq(schema.orders.id, fill.oid));
-
       // Обновляем баланс (вычитаем комиссию)
       memoryStorage.updateBalance(-Number(fill.fee));
 
-      await db
-        .update(schema.strategies)
-        .set({
-          balance: memoryStorage.getBalance(),
-        })
-        .where(eq(schema.strategies.id, strategy.id));
+      // Обновляем ордер - привязываем к позиции и обновляем статус
+      // Перезаписываем averagePrice фактической ценой исполнения (для отчетности)
+      await Promise.all([
+        db
+          .update(schema.orders)
+          .set({
+            status: 'FILLED',
+            positionId: position.id,
+            averagePrice: Number(fill.px), // фактическая цена исполнения
+            fee: Number(fill.fee),
+            closedAt: new Date().toISOString(),
+          })
+          .where(eq(schema.orders.id, fill.oid)),
+        await db
+          .update(schema.strategies)
+          .set({
+            balance: memoryStorage.getBalance(),
+          })
+          .where(eq(schema.strategies.id, strategy.id)),
+      ]);
 
-      // Удаляем ордер из памяти (т.к. он уже FILLED)
       memoryStorage.removeOrder(fill.oid);
 
       console.log(`BUY order ${fill.oid} filled: created position ${position.id} at ${gridPrice}, close at ${closeGridPrice}`);
@@ -420,15 +363,13 @@ class StrategyService {
     }
 
     try {
-      // Находим ордер в памяти, чтобы получить positionId
-      const order = memoryStorage.getOrders().find((o) => o.id === fill.oid);
+      const order = memoryStorage.findOrder(fill.oid);
 
       if (!order || !order.positionId) {
         console.error('Order or position not found for SELL fill:', fill.oid);
         return;
       }
 
-      // Находим позицию
       const position = memoryStorage.getPositions().find((p) => p.id === order.positionId);
 
       if (!position) {
@@ -436,47 +377,40 @@ class StrategyService {
         return;
       }
 
-      // Рассчитываем PnL на основе фактических цен исполнения
-      const closedPnl = (Number(fill.px) - position.avgOpenPrice) * Number(fill.sz);
+      console.log(`SELL fill: target price ${order.averagePrice}, actual fill price ${fill.px}, PnL: ${fill.closedPnl}`);
 
-      console.log(`SELL fill: target price ${order.averagePrice}, actual fill price ${fill.px}, PnL: ${closedPnl.toFixed(2)}`);
-
-      // Закрываем позицию
-      await db
-        .update(schema.positions)
-        .set({
-          status: 'CLOSED',
-        })
-        .where(eq(schema.positions.id, position.id));
-
-      // Обновляем ордер
-      // Перезаписываем averagePrice фактической ценой исполнения (для отчетности)
-      await db
-        .update(schema.orders)
-        .set({
-          status: 'FILLED',
-          averagePrice: Number(fill.px), // фактическая цена исполнения
-          fee: Number(fill.fee),
-          closedPnl: closedPnl,
-          closedAt: new Date().toISOString(),
-        })
-        .where(eq(schema.orders.id, fill.oid));
-
-      memoryStorage.updateBalance(closedPnl);
+      memoryStorage.updateBalance(Number(fill.closedPnl));
       memoryStorage.updateBalance(-Number(fill.fee));
 
-      await db
-        .update(schema.strategies)
-        .set({
-          balance: memoryStorage.getBalance(),
-        })
-        .where(eq(schema.strategies.id, strategy.id));
+      await Promise.all([
+        db
+          .update(schema.positions)
+          .set({
+            status: 'CLOSED',
+          })
+          .where(eq(schema.positions.id, position.id)),
+        db
+          .update(schema.orders)
+          .set({
+            status: 'FILLED',
+            averagePrice: Number(fill.px), // фактическая цена исполнения
+            fee: Number(fill.fee),
+            closedPnl: Number(fill.closedPnl),
+            closedAt: new Date().toISOString(),
+          })
+          .where(eq(schema.orders.id, fill.oid)),
+        db
+          .update(schema.strategies)
+          .set({
+            balance: memoryStorage.getBalance(),
+          })
+          .where(eq(schema.strategies.id, strategy.id)),
+      ]);
 
-      // Удаляем позицию и ордер из памяти
       memoryStorage.removePosition(position.id);
       memoryStorage.removeOrder(fill.oid);
 
-      console.log(`SELL order ${fill.oid} filled: closed position ${position.id}, PnL: ${closedPnl.toFixed(2)}`);
+      console.log(`SELL order ${fill.oid} filled: closed position ${position.id}, PnL: ${fill.closedPnl}`);
     } catch (error) {
       console.error('Error handling SELL order fill:', error);
     }

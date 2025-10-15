@@ -239,9 +239,7 @@ class HyperliquidService {
     await this.cancelAllOrders();
 
     const buyTarget = strategyService.findBuyTargets(currentPrice);
-    const sellTarget = strategyService.findSellTargets(currentPrice);
-
-    console.log(`Placing orders: ${buyTarget ? 1 : 0} BUY + ${sellTarget ? 1 : 0} SELL, at ${currentPrice} price`);
+    const sellTarget = strategyService.findSellTargets();
 
     if (buyTarget) {
       await this.placeBuyOrder(buyTarget.price, buyTarget.size);

@@ -79,6 +79,10 @@ class MemoryStorage {
     return this.getPositions().filter((p) => p.status === 'OPENED');
   }
 
+  getOpenPositionsSortedByClosePrice(): Position[] {
+    return this.getOpenPositions().sort((a, b) => a.gridClosePrice - b.gridClosePrice);
+  }
+
   addPosition(position: Position): void {
     this.positions.set(position.id, position);
   }

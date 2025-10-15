@@ -10,7 +10,7 @@ export const positions = sqliteTable('positions', {
   status: text('status', { enum: ['OPENED', 'CLOSED'] }).notNull(),
   gridOpenPrice: real('gridOpenPrice').notNull(),
   avgOpenPrice: real('avgOpenPrice').notNull(),
-  gridClosePrice: real('gridClosePrice'),
+  gridClosePrice: real('gridClosePrice').notNull(),
   avgClosePrice: real('avgClosePrice'),
 });
 

@@ -5,6 +5,7 @@ import { Hono } from 'hono';
 import { z } from 'zod';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
+import { logger } from '../common/logger';
 import strategyRunner from '../services/strategyRunner';
 
 const StrategySchema = z.object({
@@ -107,7 +108,7 @@ app.patch('/:strategyId/toggle', zValidator('json', ToggleEnabledSchema), async 
     try {
       await strategyRunner.enableStrategy(strategyId);
     } catch (error) {
-      console.error('Error enabling strategy:', error);
+      logger.error('Error enabling strategy:', error);
       return c.json(
         {
           error: 'Failed to enable strategy',
@@ -124,6 +125,17 @@ app.patch('/:strategyId/toggle', zValidator('json', ToggleEnabledSchema), async 
     strategyId: result[0].id,
     enabled: result[0].enabled,
   });
+});
+
+app.get('/', async (c) => {
+  const strategies = await db.select().from(schema.strategies);
+  return c.json(strategies);
+});
+
+app.get('/:strategyId', async (c) => {
+  const strategyId = c.req.param('strategyId');
+  const strategy = await db.select().from(schema.strategies).where(eq(schema.strategies.id, strategyId)).limit(1);
+  return c.json(strategy[0]);
 });
 
 export default app;
