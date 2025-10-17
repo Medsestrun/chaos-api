@@ -88,3 +88,26 @@ export function getOrderSizeForGrid(gridPrice: number): number {
 
   return memoryStorage.getOrderSizeLevels()[levelIndex]?.size || 0;
 }
+
+export function getModifier(arr: Array<number>): number {
+  const len = arr.length;
+  if (len === 0) return 1;
+  if (len >= 5) return 1.5;
+  return 1 + len * 0.1;
+}
+
+export function adjustPriceByGrid(
+  price: number | string,
+  grid: Array<number>,
+  modifiers: Array<number>,
+  direction: 'buy' | 'sell',
+): BigNumber {
+  const base = new BigNumber(price);
+
+  if (grid.length < 2) return base;
+
+  const diff = new BigNumber(grid[1] ?? 0).minus(grid[0] ?? 0).abs();
+  const modifier = getModifier(Array.from(modifiers));
+  const amplifiedDiff = diff.times(modifier);
+  return direction === 'sell' ? base.plus(amplifiedDiff) : base.minus(amplifiedDiff);
+}

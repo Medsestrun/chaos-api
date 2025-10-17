@@ -1,8 +1,18 @@
+import BigNumber from 'bignumber.js';
 import { eq } from 'drizzle-orm';
 import { Hyperliquid, type OrderResponse, type WsOrder, type WsUserFills, type WsUserFundings } from 'hyperliquid';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
-import { getOrderIdFromStatus, getOrderSizeForGrid, getOrderSizeInEth, roundPrice, roundSize } from '../common/utils';
+import { logger } from '../common/logger';
+import {
+  adjustPriceByGrid,
+  getModifier,
+  getOrderIdFromStatus,
+  getOrderSizeForGrid,
+  getOrderSizeInEth,
+  roundPrice,
+  roundSize,
+} from '../common/utils';
 import memoryStorage from '../MemoryStorage';
 import strategyService from './strategyService';
 
@@ -59,6 +69,7 @@ class HyperliquidService {
         });
 
         this.sdk.subscriptions.subscribeToUserFundings(this.walletAddress, (updates) => {
+          memoryStorage.clearAllModifiers();
           this.handleUserFundings(updates);
         });
       }
@@ -128,6 +139,10 @@ class HyperliquidService {
       const totalSize = fills.reduce((sum, f) => sum + Number(f.sz), 0);
       const totalFee = fills.reduce((sum, f) => sum + Number(f.fee), 0);
       const avgPrice = fills.reduce((sum, f) => sum + Number(f.px) * Number(f.sz), 0) / totalSize;
+
+      if (!BigNumber(totalSize).isEqualTo(BigNumber(order.size))) {
+        logger.error(`Order ${oid} size mismatch: ${totalSize} !== ${order.size}`, { fill: fills, order });
+      }
 
       const aggregatedFill = {
         ...firstFill,
@@ -291,7 +306,7 @@ class HyperliquidService {
       return;
     }
 
-    console.log(`Placing BUY order for ${totalSizeInUsdt} USDT to open positions for ${grid.length - currentGridIndex} grids above`);
+    logger.info(`Placing BUY order for ${totalSizeInUsdt} USDT to open positions for ${grid.length - currentGridIndex} grids above`);
 
     try {
       const orderResponse = await this.placeBuyOrder(Math.floor(currentPrice), totalSizeInUsdt, 'INITIAL_POSITIONS_BUY_UP');
@@ -306,15 +321,29 @@ class HyperliquidService {
   }
 
   private async placeBuyOrder(
-    price: number,
+    gridPrice: number,
     sizeInUsdt: number,
     orderType: 'REGULAR' | 'INITIAL_POSITIONS_BUY_UP' | 'FILL_EMPTY_POSITIONS' | 'ORDER_SIZE_INCREASE' = 'REGULAR',
   ): Promise<OrderResponse | null> {
     if (!this.sdk) return null;
 
+    let actualPrice = gridPrice;
+
     try {
-      const size = getOrderSizeInEth(price, sizeInUsdt);
-      const roundedPrice = orderType === 'INITIAL_POSITIONS_BUY_UP' ? roundPrice(price + 100) : roundPrice(price);
+      if (orderType === 'REGULAR') {
+        let modifier = memoryStorage.getGridBuyModifier(gridPrice);
+        const modifiers = Array.from(memoryStorage.getAllGridBuyModifiers().values());
+
+        if (!modifier) {
+          modifier = getModifier(modifiers);
+          memoryStorage.setGridBuyModifier(gridPrice, modifier);
+        }
+
+        actualPrice = adjustPriceByGrid(gridPrice, memoryStorage.getStrategy()?.settings.grid || [], modifiers, 'buy').toNumber();
+      }
+
+      const size = getOrderSizeInEth(actualPrice, sizeInUsdt);
+      const roundedPrice = orderType === 'INITIAL_POSITIONS_BUY_UP' ? roundPrice(actualPrice + 100) : roundPrice(actualPrice);
 
       console.log(`Placing LIMIT BUY order: price=${roundedPrice}, size=${size} ETH`);
 
@@ -334,7 +363,14 @@ class HyperliquidService {
 
         if (orderId) {
           // В базе все равно записываем фактическую цену ордера, а не повышеную (ее повышаем чтобы точно исполнился market order)
-          await strategyService.saveOpenedOrderToDB(orderId, size, 'BUY', roundPrice(price), orderType);
+          await strategyService.saveOpenedOrderToDB(
+            orderId,
+            size,
+            'BUY',
+            orderType === 'INITIAL_POSITIONS_BUY_UP' ? roundPrice(gridPrice) : roundPrice(actualPrice),
+            gridPrice,
+            orderType,
+          );
         }
       }
 
@@ -345,11 +381,11 @@ class HyperliquidService {
     }
   }
 
-  private async placeSellOrder(price: number, sizeInEth: number, positionId: number): Promise<OrderResponse | null> {
+  private async placeSellOrder(gridPrice: number, sizeInEth: number, positionId: number): Promise<OrderResponse | null> {
     if (!this.sdk) return null;
 
     try {
-      const roundedPrice = roundPrice(price);
+      const roundedPrice = roundPrice(gridPrice);
       const roundedSize = roundSize(sizeInEth);
 
       console.log(`Placing SELL order: price=${roundedPrice}, size=${roundedSize} ETH, positionId=${positionId}`);
@@ -368,7 +404,7 @@ class HyperliquidService {
       if (orderResponse?.status === 'ok') {
         const orderId = getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
         if (orderId) {
-          await strategyService.saveOpenedOrderToDB(orderId, roundedSize, 'SELL', roundedPrice, 'REGULAR', positionId);
+          await strategyService.saveOpenedOrderToDB(orderId, roundedSize, 'SELL', roundedPrice, gridPrice, 'REGULAR', positionId);
         }
       }
 

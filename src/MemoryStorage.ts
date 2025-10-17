@@ -23,6 +23,8 @@ class MemoryStorage {
   private orderSizeLevels: OrderSizeLevel[] = [];
   private positions: Map<number, Position> = new Map();
   private orders: Map<number, Order> = new Map();
+  private gridBuyModifiers: Map<number, number> = new Map();
+  private gridSellModifiers: Map<number, number> = new Map();
 
   private constructor() {}
 
@@ -127,11 +129,42 @@ class MemoryStorage {
     return this.orders.get(id);
   }
 
+  setGridBuyModifier(gridIndex: number, modifier: number): void {
+    this.gridBuyModifiers.set(gridIndex, modifier);
+  }
+
+  getAllGridBuyModifiers(): Map<number, number> {
+    return this.gridBuyModifiers;
+  }
+
+  getGridBuyModifier(gridIndex: number): number {
+    return this.gridBuyModifiers.get(gridIndex) || 0;
+  }
+
+  setGridSellModifier(gridIndex: number, modifier: number): void {
+    this.gridSellModifiers.set(gridIndex, modifier);
+  }
+
+  getAllGridSellModifiers(): Map<number, number> {
+    return this.gridSellModifiers;
+  }
+
+  getGridSellModifier(gridIndex: number): number {
+    return this.gridSellModifiers.get(gridIndex) || 0;
+  }
+
+  clearAllModifiers(): void {
+    this.gridBuyModifiers.clear();
+    this.gridSellModifiers.clear();
+  }
+
   clear(): void {
     this.strategy = null;
     this.orderSizeLevels = [];
     this.positions.clear();
     this.orders.clear();
+    this.gridBuyModifiers.clear();
+    this.gridSellModifiers.clear();
   }
 }
 

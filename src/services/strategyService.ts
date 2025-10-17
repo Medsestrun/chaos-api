@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import type { WsUserFill } from 'hyperliquid';
 import { db } from '../common/db';
 import * as schema from '../common/db/schema';
+import { logger } from '../common/logger';
 import { getOrderSizeForGrid } from '../common/utils';
 import memoryStorage from '../MemoryStorage';
 
@@ -183,17 +184,32 @@ class StrategyService {
       }
     }
 
+    // Проверяем количество покупок за текущий час
+    const buyModifiersCount = memoryStorage.getAllGridBuyModifiers().size;
+    const shouldSkipEveryOther = buyModifiersCount > 2;
+
     // Сначала ищем грида ниже текущей цены (приоритетные)
+    let skipCounter = 0;
     for (let i = currentGridIndex - 1; i >= 0; i--) {
       const gridPrice = grid[i];
       const hasPosition = positionsByGrid.has(i);
       const hasOpenOrder = gridPrice !== undefined && buyOrderPrices.has(gridPrice);
 
       if (!hasPosition && !hasOpenOrder && gridPrice !== undefined) {
+        // Если больше 2 покупок за час, пропускаем каждый второй подходящий грид
+        if (shouldSkipEveryOther && skipCounter % 2 === 0) {
+          skipCounter++;
+          logger.info(`Skipping grid ${gridPrice} (buy ${skipCounter} after 2+ buys per hour)`);
+          continue;
+        }
+
         const orderSize = getOrderSizeForGrid(gridPrice);
         if (orderSize > 0) {
+          console.log(`Found grid ${gridPrice} for buy (skipCounter: ${skipCounter}, buyModifiersCount: ${buyModifiersCount})`);
           return { gridIndex: i, price: gridPrice, size: orderSize };
         }
+
+        skipCounter++;
       }
     }
 
@@ -201,20 +217,6 @@ class StrategyService {
     if (currentGridIndex <= 0) {
       return null;
     }
-
-    // Если не нашли ниже текущей цены, ищем любой свободный грид
-    // for (let i = 0; i < grid.length; i++) {
-    //   const gridPrice = grid[i];
-    //   const hasPosition = positionsByGrid.has(i);
-    //   const hasOpenOrder = gridPrice !== undefined && buyOrderPrices.has(gridPrice);
-
-    //   if (!hasPosition && !hasOpenOrder && gridPrice !== undefined) {
-    //     const orderSize = getOrderSizeForGrid(gridPrice);
-    //     if (orderSize > 0) {
-    //       return { gridIndex: i, price: gridPrice, size: orderSize };
-    //     }
-    //   }
-    // }
 
     return null;
   }
@@ -231,7 +233,6 @@ class StrategyService {
 
     for (const position of openPositions) {
       if (!openOrders.some((order) => order.positionId === position.id && order.side === 'SELL')) {
-        console.log(`Found sell target: ${position} at ${position.gridClosePrice}`);
         return { position, closePrice: position.gridClosePrice };
       }
     }
@@ -243,7 +244,8 @@ class StrategyService {
     orderId: number,
     size: number,
     side: 'BUY' | 'SELL',
-    price: number,
+    actualPrice: number,
+    gridPrice: number,
     orderType: 'REGULAR' | 'INITIAL_POSITIONS_BUY_UP' | 'FILL_EMPTY_POSITIONS' | 'ORDER_SIZE_INCREASE' = 'REGULAR',
     positionId: number | null = null,
   ): Promise<void> {
@@ -257,7 +259,8 @@ class StrategyService {
           positionId: positionId,
           status: 'OPENED',
           type: orderType,
-          averagePrice: price,
+          gridPrice: gridPrice,
+          averagePrice: actualPrice,
           fee: 0,
           closedPnl: 0,
         })
@@ -265,7 +268,7 @@ class StrategyService {
 
       if (order[0]) {
         memoryStorage.addOrder(order[0] as typeof schema.orders.$inferSelect);
-        console.log(`Order ${orderId} saved to DB (${side} at ${price})`);
+        console.log(`Order ${orderId} saved to DB (${side} at ${actualPrice})`);
       }
     } catch (error) {
       console.error('Error saving opened order to DB:', error);
@@ -289,17 +292,13 @@ class StrategyService {
 
       const grid = strategy.settings.grid;
 
-      // Используем целевую цену грида из ордера (averagePrice), а не фактическую цену исполнения
-      // Это важно, т.к. LIMIT ордер может исполниться по лучшей цене
-      const gridPrice = this.findFirstGridLower(order.averagePrice);
-
-      if (gridPrice === null) {
+      if (order.gridPrice === null) {
         console.error('Grid price not found for target price:', order.averagePrice);
         console.log('Available grids:', grid);
         return;
       }
 
-      const gridIndex = grid.indexOf(gridPrice);
+      const gridIndex = grid.indexOf(order.gridPrice);
       const closeGridPrice = gridIndex !== -1 && gridIndex + 1 < grid.length ? grid[gridIndex + 1] : null;
 
       // Создаем позицию
@@ -309,7 +308,7 @@ class StrategyService {
           strategyId: strategy.id,
           size: Number(fill.sz),
           status: 'OPENED',
-          gridOpenPrice: gridPrice, // целевой грид
+          gridOpenPrice: order.gridPrice, // целевой грид
           avgOpenPrice: Number(fill.px), // фактическая цена исполнения
           gridClosePrice: closeGridPrice || (grid[grid.length - 1] || 0) + 500,
         })
@@ -349,7 +348,7 @@ class StrategyService {
 
       memoryStorage.removeOrder(fill.oid);
 
-      console.log(`BUY order ${fill.oid} filled: created position ${position.id} at ${gridPrice}, close at ${closeGridPrice}`);
+      console.log(`BUY order ${fill.oid} filled: created position ${position.id} at ${order.gridPrice}, close at ${closeGridPrice}`);
     } catch (error) {
       console.error('Error handling BUY order fill:', error);
     }
@@ -393,7 +392,7 @@ class StrategyService {
           .update(schema.orders)
           .set({
             status: 'FILLED',
-            averagePrice: Number(fill.px), // фактическая цена исполнения
+            averagePrice: Number(fill.px),
             fee: Number(fill.fee),
             closedPnl: Number(fill.closedPnl),
             closedAt: new Date().toISOString(),

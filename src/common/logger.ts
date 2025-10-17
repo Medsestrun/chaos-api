@@ -209,6 +209,15 @@ class Logger {
 
   constructor() {
     this.addTransport(new ConsoleTransport());
+
+    if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
+      this.addTransport(
+        new TelegramTransport({
+          botToken: process.env.TELEGRAM_BOT_TOKEN,
+          chatId: process.env.TELEGRAM_CHAT_ID,
+        }),
+      );
+    }
   }
 
   addTransport(transport: LogTransport): void {
