@@ -107,7 +107,7 @@ class MemoryStorage {
   }
 
   getOpenOrders(): Order[] {
-    return this.getOrders().filter((o) => o.status === 'OPENED');
+    return this.getOrders().filter((o) => o.status === 'OPENED' || o.status === 'PARTIALLY_FILLED');
   }
 
   removeOrder(id: number): void {

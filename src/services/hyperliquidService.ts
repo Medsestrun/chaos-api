@@ -104,10 +104,10 @@ class HyperliquidService {
   }
 
   private async handleFills(data: WsUserFills): Promise<void> {
-    console.log('Received fills:', data.fills);
+    logger.info('Received fills:', data.fills);
 
     if (data.fills.length > 1) {
-      console.log('Received multiple fills:', data.fills);
+      logger.info('Received multiple fills:', data.fills);
     }
 
     // Группируем fills по oid (один ордер может иметь несколько fills)
@@ -136,18 +136,62 @@ class HyperliquidService {
         continue;
       }
 
-      const totalSize = fills.reduce((sum, f) => sum + Number(f.sz), 0);
-      const totalFee = fills.reduce((sum, f) => sum + Number(f.fee), 0);
-      const avgPrice = fills.reduce((sum, f) => sum + Number(f.px) * Number(f.sz), 0) / totalSize;
+      const totalSize = fills.reduce((sum, f) => sum.plus(BigNumber(f.sz)), BigNumber(0));
+      const totalFee = fills.reduce((sum, f) => sum.plus(BigNumber(f.fee)), BigNumber(0));
 
-      if (!BigNumber(totalSize).isEqualTo(BigNumber(order.size))) {
-        logger.error(`Order ${oid} size mismatch: ${totalSize} !== ${order.size}`, { fill: fills, order });
+      // Вычисляем средневзвешенную цену
+      const totalValue = fills.reduce((sum, f) => sum.plus(BigNumber(f.px).multipliedBy(BigNumber(f.sz))), BigNumber(0));
+      const avgPrice = totalSize.isZero() ? BigNumber(0) : totalValue.dividedBy(totalSize);
+
+      // Получаем текущий filledSize из памяти
+      const currentFilledSize = BigNumber(order.filledSize || 0);
+      const newFilledSize = currentFilledSize.plus(totalSize);
+
+      // Проверяем, полностью ли исполнен ордер
+      const isPartiallyFilled = newFilledSize.isLessThan(BigNumber(order.size));
+
+      if (isPartiallyFilled) {
+        logger.warn(`Order ${oid} partially filled: ${newFilledSize.toString()} / ${order.size}`, { fill: fills, order });
+
+        // Обновляем баланс (вычитаем комиссию)
+        memoryStorage.updateBalance(-totalFee.toNumber());
+
+        const strategy = memoryStorage.getStrategy();
+        if (strategy) {
+          await db
+            .update(schema.strategies)
+            .set({
+              balance: memoryStorage.getBalance(),
+            })
+            .where(eq(schema.strategies.id, strategy.id));
+        }
+
+        // Обновляем filledSize в памяти и БД
+        const newFee = BigNumber(order.fee).plus(totalFee);
+
+        memoryStorage.updateOrder(oid, {
+          filledSize: newFilledSize.toNumber(),
+          status: 'PARTIALLY_FILLED',
+          fee: newFee.toNumber(),
+        });
+
+        await db
+          .update(schema.orders)
+          .set({
+            filledSize: newFilledSize.toNumber(),
+            status: 'PARTIALLY_FILLED',
+            fee: newFee.toNumber(),
+          })
+          .where(eq(schema.orders.id, oid));
+
+        // Частичное исполнение - не обрабатываем дальше
+        continue;
       }
 
       const aggregatedFill = {
         ...firstFill,
-        sz: totalSize.toString(),
-        fee: totalFee.toString(),
+        sz: newFilledSize.toString(),
+        fee: BigNumber(order.fee).plus(totalFee).toString(),
         px: avgPrice.toString(),
       };
 
@@ -208,6 +252,11 @@ class HyperliquidService {
         return;
       }
 
+      // Обрабатываем частично исполненный ордер
+      if (order.status === 'PARTIALLY_FILLED' && order.filledSize > 0) {
+        await this.handlePartiallyFilledOrderCancellation(order);
+      }
+
       await db
         .update(schema.orders)
         .set({
@@ -220,6 +269,84 @@ class HyperliquidService {
     }
 
     console.log(`Successfully cancelled all open orders`);
+  }
+
+  /**
+   * Обрабатывает отмену частично исполненного ордера
+   */
+  private async handlePartiallyFilledOrderCancellation(order: typeof schema.orders.$inferSelect): Promise<void> {
+    const strategy = memoryStorage.getStrategy();
+    if (!strategy) {
+      logger.error('Strategy not found');
+      return;
+    }
+
+    logger.info(`Handling partially filled order cancellation: ${order.id}, filled: ${order.filledSize}/${order.size}`);
+
+    if (order.side === 'BUY') {
+      // Для BUY ордера создаем позицию с размером filledSize
+      const grid = strategy.settings.grid;
+      const gridIndex = order.gridPrice ? grid.indexOf(order.gridPrice) : -1;
+      const closeGridPrice = gridIndex !== -1 && gridIndex + 1 < grid.length ? grid[gridIndex + 1] : null;
+
+      const createdPosition = await db
+        .insert(schema.positions)
+        .values({
+          strategyId: strategy.id,
+          size: order.filledSize,
+          status: 'OPENED',
+          gridOpenPrice: order.gridPrice || order.averagePrice,
+          avgOpenPrice: order.averagePrice,
+          gridClosePrice: closeGridPrice || (grid[grid.length - 1] || 0) + 500,
+        })
+        .returning();
+
+      if (createdPosition[0]) {
+        const position = createdPosition[0] as typeof schema.positions.$inferSelect;
+        memoryStorage.addPosition(position);
+
+        // Обновляем positionId в ордере
+        await db
+          .update(schema.orders)
+          .set({
+            positionId: position.id,
+          })
+          .where(eq(schema.orders.id, order.id));
+
+        logger.info(`Created position ${position.id} for partially filled BUY order ${order.id} with size ${order.filledSize}`);
+      }
+    } else if (order.side === 'SELL' && order.positionId) {
+      // Для SELL ордера уменьшаем размер позиции на filledSize
+      const position = memoryStorage.getPositions().find((p) => p.id === order.positionId);
+
+      if (position) {
+        const newSize = BigNumber(position.size).minus(BigNumber(order.filledSize));
+
+        if (newSize.isLessThanOrEqualTo(0)) {
+          // Позиция полностью закрыта
+          await db
+            .update(schema.positions)
+            .set({
+              status: 'CLOSED',
+            })
+            .where(eq(schema.positions.id, position.id));
+
+          memoryStorage.removePosition(position.id);
+          logger.info(`Closed position ${position.id} - fully sold via partial fill`);
+        } else {
+          // Уменьшаем размер позиции
+          await db
+            .update(schema.positions)
+            .set({
+              size: newSize.toNumber(),
+            })
+            .where(eq(schema.positions.id, position.id));
+
+          memoryStorage.updatePosition(position.id, { size: newSize.toNumber() });
+          logger.info(`Updated position ${position.id} size from ${position.size} to ${newSize.toString()}`);
+        }
+      }
+    }
   }
 
   /**

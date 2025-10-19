@@ -1,0 +1,1 @@
+ALTER TABLE `orders` ADD `filled_size` real DEFAULT 0 NOT NULL;

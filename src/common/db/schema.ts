@@ -17,6 +17,7 @@ export const positions = sqliteTable('positions', {
 export const orders = sqliteTable('orders', {
   id: integer('id', { mode: 'number' }).primaryKey(),
   size: real('size').notNull(),
+  filledSize: real('filled_size').notNull().default(0),
   side: text('side', { enum: ['BUY', 'SELL'] }).notNull(),
   positionId: integer('position_id', { mode: 'number' }).references(() => positions.id),
   status: text('status', {
