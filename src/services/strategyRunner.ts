@@ -1,10 +1,13 @@
+import { logger } from '../common/logger';
 import memoryStorage from '../MemoryStorage';
 import hyperliquidService from './hyperliquidService';
+import metricsService from './metricsService';
 import { loadStrategy } from './strategyLoader';
 
 class StrategyRunner {
   private static instance: StrategyRunner;
   private isRunning = false;
+  private metricsInterval: Timer | null = null;
 
   private constructor() {}
 
@@ -51,7 +54,52 @@ class StrategyRunner {
     }
 
     this.isRunning = true;
+
+    // Запускаем автоматическое сохранение метрик каждый час
+    this.startMetricsCollection();
+
     console.log(`Strategy ${strategyLabel} started successfully`);
+  }
+
+  /**
+   * Запускает автоматическое сохранение метрик
+   */
+  private startMetricsCollection(): void {
+    // Сохраняем метрики каждый час
+    this.metricsInterval = setInterval(
+      () => {
+        this.saveMetricsSnapshot();
+      },
+      60 * 60 * 1000,
+    ); // 1 час
+
+    logger.info('Metrics collection started (hourly snapshots)');
+  }
+
+  /**
+   * Останавливает автоматическое сохранение метрик
+   */
+  private stopMetricsCollection(): void {
+    if (this.metricsInterval) {
+      clearInterval(this.metricsInterval);
+      this.metricsInterval = null;
+      logger.info('Metrics collection stopped');
+    }
+  }
+
+  /**
+   * Сохраняет снимок метрик
+   */
+  private async saveMetricsSnapshot(): Promise<void> {
+    try {
+      const currentPrice = hyperliquidService.getCurrentPrice();
+      if (currentPrice > 0) {
+        await metricsService.saveMetricsSnapshot(currentPrice);
+        logger.info('Metrics snapshot saved successfully');
+      }
+    } catch (error) {
+      logger.error('Error saving metrics snapshot:', error);
+    }
   }
 
   async start(): Promise<void> {
@@ -89,6 +137,9 @@ class StrategyRunner {
     }
 
     console.log('Stopping strategy runner...');
+
+    // Останавливаем сохранение метрик
+    this.stopMetricsCollection();
 
     await hyperliquidService.cancelAllOrders();
 

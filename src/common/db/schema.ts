@@ -62,3 +62,21 @@ export const orderSizeLevels = sqliteTable('order_size_levels', {
   levelStart: integer('level_start', { mode: 'number' }).notNull(),
   levelEnd: integer('level_end', { mode: 'number' }).notNull(),
 });
+
+export const metricsSnapshots = sqliteTable('metrics_snapshots', {
+  id: integer('id', { mode: 'number' }).primaryKey({ autoIncrement: true }),
+  strategyId: text('strategy_id')
+    .references(() => strategies.id)
+    .notNull(),
+  timestamp: integer('timestamp', { mode: 'timestamp' }).notNull().default(sql`(unixepoch())`),
+  totalProfit: real('total_profit').notNull().default(0),
+  matchedProfit: real('matched_profit').notNull().default(0),
+  unmatchedProfit: real('unmatched_profit').notNull().default(0),
+  investedMargin: real('invested_margin').notNull().default(0),
+  fundingFee: real('funding_fee').notNull().default(0),
+  totalFees: real('total_fees').notNull().default(0),
+  currentPrice: real('current_price').notNull(),
+  openPositionsCount: integer('open_positions_count', { mode: 'number' }).notNull().default(0),
+  closedPositionsCount: integer('closed_positions_count', { mode: 'number' }).notNull().default(0),
+  totalTradesCount: integer('total_trades_count', { mode: 'number' }).notNull().default(0),
+});

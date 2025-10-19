@@ -215,6 +215,7 @@ class Logger {
         new TelegramTransport({
           botToken: process.env.TELEGRAM_BOT_TOKEN,
           chatId: process.env.TELEGRAM_CHAT_ID,
+          minLevel: LogLevel.INFO,
         }),
       );
     }
