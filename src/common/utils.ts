@@ -91,23 +91,18 @@ export function getOrderSizeForGrid(gridPrice: number): number {
 
 export function getModifier(arr: Array<number>): number {
   const len = arr.length;
-  if (len === 0) return 1;
+  if (len === 0) return 0; // Первый ордер без смещения
   if (len >= 5) return 1.5;
   return 1 + len * 0.1;
 }
 
-export function adjustPriceByGrid(
-  price: number | string,
-  grid: Array<number>,
-  modifiers: Array<number>,
-  direction: 'buy' | 'sell',
-): BigNumber {
+export function adjustPriceByGrid(price: number | string, grid: Array<number>, modifier: number, direction: 'buy' | 'sell'): BigNumber {
   const base = new BigNumber(price);
 
   if (grid.length < 2) return base;
 
   const diff = new BigNumber(grid[1] ?? 0).minus(grid[0] ?? 0).abs();
-  const modifier = getModifier(Array.from(modifiers));
-  const amplifiedDiff = diff.times(modifier);
+  // Используем модификатор как процент: делим на 100 чтобы modifier=1 давал 1% смещения
+  const amplifiedDiff = diff.times(modifier).dividedBy(100);
   return direction === 'sell' ? base.plus(amplifiedDiff) : base.minus(amplifiedDiff);
 }

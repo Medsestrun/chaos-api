@@ -205,7 +205,7 @@ class StrategyService {
 
         const orderSize = getOrderSizeForGrid(gridPrice);
         if (orderSize > 0) {
-          console.log(`Found grid ${gridPrice} for buy (skipCounter: ${skipCounter}, buyModifiersCount: ${buyModifiersCount})`);
+          logger.info(`Found grid ${gridPrice} for buy (skipCounter: ${skipCounter}, buyModifiersCount: ${buyModifiersCount})`);
           return { gridIndex: i, price: gridPrice, size: orderSize };
         }
 

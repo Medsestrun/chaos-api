@@ -22,6 +22,13 @@
       "when": 1760477573775,
       "tag": "0002_long_lethal_legion",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1760795036365,
+      "tag": "0003_red_groot",
+      "breakpoints": true
     }
   ]
 }

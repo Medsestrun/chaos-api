@@ -315,7 +315,7 @@ class HyperliquidService {
         throw new Error(`Failed to place buy service order: ${orderResponse?.status}`);
       }
     } catch (error) {
-      console.error('Error placing initial positions buy order:', error);
+      logger.error('Error placing initial positions buy order:', error);
       this.openInitialPositions();
     }
   }
@@ -337,15 +337,16 @@ class HyperliquidService {
         if (!modifier) {
           modifier = getModifier(modifiers);
           memoryStorage.setGridBuyModifier(gridPrice, modifier);
+          logger.info(`Setting buy modifier for grid price ${gridPrice} to ${modifier}`);
         }
 
-        actualPrice = adjustPriceByGrid(gridPrice, memoryStorage.getStrategy()?.settings.grid || [], modifiers, 'buy').toNumber();
+        actualPrice = adjustPriceByGrid(gridPrice, memoryStorage.getStrategy()?.settings.grid || [], modifier, 'buy').toNumber();
       }
 
       const size = getOrderSizeInEth(actualPrice, sizeInUsdt);
       const roundedPrice = orderType === 'INITIAL_POSITIONS_BUY_UP' ? roundPrice(actualPrice + 100) : roundPrice(actualPrice);
 
-      console.log(`Placing LIMIT BUY order: price=${roundedPrice}, size=${size} ETH`);
+      logger.buy(`Placing LIMIT BUY order: price=${roundedPrice}, size=${size} ETH`, { actualPrice, sizeInUsdt, gridPrice });
 
       const orderResponse = await this.sdk.wsPayloads.placeOrder({
         coin: 'ETH-PERP',
@@ -376,7 +377,7 @@ class HyperliquidService {
 
       return orderResponse as OrderResponse;
     } catch (error) {
-      console.error('Error placing buy order:', error);
+      logger.error('Error placing buy order:', error);
       throw error;
     }
   }
@@ -384,11 +385,29 @@ class HyperliquidService {
   private async placeSellOrder(gridPrice: number, sizeInEth: number, positionId: number): Promise<OrderResponse | null> {
     if (!this.sdk) return null;
 
+    let actualPrice = gridPrice;
+
     try {
-      const roundedPrice = roundPrice(gridPrice);
+      let modifier = memoryStorage.getGridSellModifier(gridPrice);
+      const modifiers = Array.from(memoryStorage.getAllGridSellModifiers().values());
+
+      if (!modifier) {
+        modifier = getModifier(modifiers);
+        memoryStorage.setGridSellModifier(gridPrice, modifier);
+        logger.info(`Setting sell modifier for grid price ${gridPrice} to ${modifier}`);
+      }
+
+      actualPrice = adjustPriceByGrid(gridPrice, memoryStorage.getStrategy()?.settings.grid || [], modifier, 'sell').toNumber();
+
+      const roundedPrice = roundPrice(actualPrice);
       const roundedSize = roundSize(sizeInEth);
 
-      console.log(`Placing SELL order: price=${roundedPrice}, size=${roundedSize} ETH, positionId=${positionId}`);
+      logger.sell(`Placing SELL order: price=${roundedPrice}, size=${roundedSize} ETH, positionId=${positionId}`, {
+        actualPrice,
+        sizeInEth,
+        positionId,
+        gridPrice,
+      });
 
       const orderResponse = await this.sdk.wsPayloads.placeOrder({
         coin: 'ETH-PERP',
@@ -404,13 +423,21 @@ class HyperliquidService {
       if (orderResponse?.status === 'ok') {
         const orderId = getOrderIdFromStatus(orderResponse?.response?.data?.statuses[0]);
         if (orderId) {
-          await strategyService.saveOpenedOrderToDB(orderId, roundedSize, 'SELL', roundedPrice, gridPrice, 'REGULAR', positionId);
+          await strategyService.saveOpenedOrderToDB(
+            orderId,
+            roundedSize,
+            'SELL',
+            roundPrice(actualPrice),
+            gridPrice,
+            'REGULAR',
+            positionId,
+          );
         }
       }
 
       return orderResponse as OrderResponse;
     } catch (error) {
-      console.error('Error placing sell order:', error);
+      logger.error('Error placing sell order:', error);
       throw error;
     }
   }
